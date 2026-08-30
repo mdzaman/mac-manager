@@ -102,3 +102,7 @@ Sources/
 Tools/MakeIcon.swift       app icon, drawn in code
 build.sh                   compile, bundle, sign
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
