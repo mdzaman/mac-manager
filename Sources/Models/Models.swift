@@ -1,0 +1,202 @@
+import Foundation
+
+// MARK: - Applications
+
+struct InstalledApp: Identifiable, Equatable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let bundleID: String
+    let version: String
+    let location: Location
+    var sizeBytes: Int64?
+    var lastUsed: Date?
+
+    enum Location: String {
+        case applications = "Applications"
+        case userApplications = "User Applications"
+        case system = "System"
+
+        /// System apps ship with macOS and are protected by SIP — the app
+        /// surfaces them for context but never offers to remove them.
+        var removable: Bool { return self != .system }
+    }
+
+    static func == (lhs: InstalledApp, rhs: InstalledApp) -> Bool {
+        return lhs.path == rhs.path
+            && lhs.sizeBytes == rhs.sizeBytes
+            && lhs.lastUsed == rhs.lastUsed
+    }
+}
+
+/// A support file left behind by an app — caches, preferences, containers.
+struct LeftoverItem: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let category: String
+    var sizeBytes: Int64
+    var selected: Bool = true
+
+    var displayPath: String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+}
+
+// MARK: - Memory
+
+struct MemorySnapshot {
+    var totalBytes: Int64 = 0
+    var appBytes: Int64 = 0
+    var wiredBytes: Int64 = 0
+    var compressedBytes: Int64 = 0
+    var cachedBytes: Int64 = 0
+    var freeBytes: Int64 = 0
+    var swapUsedBytes: Int64 = 0
+    var swapTotalBytes: Int64 = 0
+    var pressureLevel: Pressure = .normal
+
+    /// What Activity Monitor calls "Memory Used".
+    var usedBytes: Int64 { return appBytes + wiredBytes + compressedBytes }
+
+    var usedFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return Double(usedBytes) / Double(totalBytes)
+    }
+
+    enum Pressure: Int {
+        case normal = 1
+        case warning = 2
+        case critical = 4
+
+        var label: String {
+            switch self {
+            case .normal: return "Normal"
+            case .warning: return "Under pressure"
+            case .critical: return "Critical"
+            }
+        }
+    }
+}
+
+struct RunningProcess: Identifiable, Equatable {
+    var id: Int32 { return pid }
+
+    let pid: Int32
+    let name: String
+    let path: String
+    let memoryBytes: Int64
+    let cpuPercent: Double
+
+    /// Helper processes are noise on their own; grouping them under the parent
+    /// app is what makes the list readable.
+    var isHelper: Bool {
+        return name.contains("Helper") || name.contains("(Renderer)")
+            || name.contains("(GPU)") || name.contains("(Plugin)")
+    }
+}
+
+/// Processes belonging to one app, collapsed into a single row.
+struct ProcessGroup: Identifiable {
+    var id: String { return name }
+
+    let name: String
+    let iconPath: String?
+    var members: [RunningProcess]
+
+    var memoryBytes: Int64 { return members.reduce(0) { $0 + $1.memoryBytes } }
+    var cpuPercent: Double { return members.reduce(0) { $0 + $1.cpuPercent } }
+    var pids: [Int32] { return members.map { $0.pid } }
+}
+
+// MARK: - Storage
+
+struct VolumeInfo {
+    var totalBytes: Int64 = 0
+    var availableBytes: Int64 = 0
+    var usedBytes: Int64 { return max(0, totalBytes - availableBytes) }
+    var usedFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return Double(usedBytes) / Double(totalBytes)
+    }
+}
+
+/// A directory the app knows how to measure and (sometimes) clear.
+struct CleanupTarget: Identifiable {
+    var id: String { return path }
+
+    let name: String
+    let detail: String
+    let path: String
+    let safety: Safety
+    var sizeBytes: Int64?
+    var scanned: Bool = false
+
+    enum Safety {
+        /// Regenerated automatically; clearing costs nothing but a rebuild.
+        case safe
+        /// May hold data worth keeping — the app shows it but never preselects it.
+        case review
+
+        var label: String {
+            switch self {
+            case .safe: return "Safe to clear"
+            case .review: return "Review first"
+            }
+        }
+    }
+
+    var displayPath: String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+}
+
+// MARK: - Ports
+
+struct PortEntry: Identifiable {
+    var id: String { return "\(pid)-\(networkProtocol)-\(address)-\(port)" }
+
+    let port: Int
+    let networkProtocol: String
+    let address: String
+    let pid: Int32
+    let processName: String
+    let user: String
+
+    /// Bound to all interfaces means reachable from the local network.
+    var isExposed: Bool {
+        return address == "*" || address == "0.0.0.0" || address == "::"
+    }
+
+    var scopeLabel: String { return isExposed ? "All interfaces" : "Localhost only" }
+
+    /// Best-effort name for well-known ports, so the list means something
+    /// without having to look each one up.
+    var serviceHint: String? {
+        switch port {
+        case 22: return "SSH"
+        case 80: return "HTTP"
+        case 443: return "HTTPS"
+        case 445: return "SMB file sharing"
+        case 631: return "CUPS printing"
+        case 3000: return "Dev server"
+        case 3306: return "MySQL"
+        case 5000: return "Dev server"
+        case 5432: return "PostgreSQL"
+        case 5900: return "Screen Sharing"
+        case 6379: return "Redis"
+        case 7000: return "AirPlay Receiver"
+        case 8000, 8080, 8081: return "Dev server"
+        case 9000: return "Dev server"
+        case 27017: return "MongoDB"
+        default: return nil
+        }
+    }
+}
