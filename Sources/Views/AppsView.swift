@@ -100,7 +100,7 @@ struct AppsView: View {
                 .foregroundColor(p.textMuted).frame(width: 110, alignment: .leading)
             Text("SIZE").font(.system(size: 10, weight: .semibold))
                 .foregroundColor(p.textMuted).frame(width: 76, alignment: .trailing)
-            Text("").frame(width: 96)
+            Text("").frame(width: 118)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -192,7 +192,7 @@ struct AppRow: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Show in Finder")
             }
-            .frame(width: 96, alignment: .trailing)
+            .frame(width: 118, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)

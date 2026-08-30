@@ -179,7 +179,7 @@ struct ProcessRow: View {
                     .font(.system(size: 13))
                     .foregroundColor(p.textPrimary)
                     .lineLimit(1)
-                Text(group.members.count == 1
+                Text(verbatim: group.members.count == 1
                         ? "PID \(group.members[0].pid)"
                         : "\(group.members.count) processes")
                     .font(.system(size: 10))

@@ -59,7 +59,7 @@ struct PortsView: View {
         }
         .alert(item: $confirmQuit) { entry in
             Alert(title: Text("Quit \(entry.processName)?"),
-                  message: Text("Process \(entry.pid) is listening on port \(entry.port). It will be asked to shut down, which frees the port. Unsaved work in that process may be lost."),
+                  message: Text(verbatim: "Process \(entry.pid) is listening on port \(entry.port). It will be asked to shut down, which frees the port. Unsaved work in that process may be lost."),
                   primaryButton: .destructive(Text("Quit Process")) {
                       MemoryMonitor.quit(pids: [entry.pid])
                       DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -127,7 +127,9 @@ struct PortRow: View {
         let p = Palette(scheme)
 
         return HStack(spacing: 10) {
-            Text("\(entry.port)")
+            // Identifiers, not quantities — Text would otherwise localize
+            // these into "5,432" via LocalizedStringKey interpolation.
+            Text(verbatim: String(entry.port))
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundColor(p.textPrimary)
                 .frame(width: 62, alignment: .leading)
@@ -160,7 +162,7 @@ struct PortRow: View {
             }
             .frame(width: 150, alignment: .leading)
 
-            Text("\(entry.pid)")
+            Text(verbatim: String(entry.pid))
                 .font(.system(size: 11, design: .rounded))
                 .foregroundColor(p.textSecondary)
                 .frame(width: 56, alignment: .trailing)

@@ -290,7 +290,10 @@ struct RowButton: View {
         return Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 10, weight: .semibold))
-                Text(title).font(.system(size: 11, weight: .medium))
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundColor(tint)
             .padding(.horizontal, 9)
