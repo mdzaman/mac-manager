@@ -7,6 +7,8 @@ Native SwiftUI. No dependencies, no package manager, no network access, no
 background agent. It reads the same system tools you would run by hand
 (`lsof`, `ps`, `du`, `vm_stat`, `sysctl`, `mdls`) and puts them behind one window.
 
+![Overview](docs/screenshots/overview.png)
+
 ## Build and run
 
 ```bash
@@ -21,28 +23,46 @@ cp -R "build/Mac Manager.app" /Applications/
 
 Requires the Xcode Command Line Tools (`xcode-select --install`). Nothing else.
 
-## The four tabs
+## The five tabs
 
-**Overview** — memory, storage, app count and open ports at a glance, plus large
-apps you have not opened in over six months.
+**Overview** *(above)* — memory, storage, app count and open ports at a glance,
+plus large apps you have not opened in over six months.
 
-**Applications** — everything in `/Applications` and `~/Applications` with its
-version, size, and the date you last opened it. Sort by size to find what is
-costing you, or by last opened to find what you have forgotten about. Removing an
-app also finds the support files it scattered through your Library folders, which
-a plain drag-to-Trash leaves behind — often far larger than the app itself.
+### Applications
 
-**Memory** — a live breakdown of app memory, wired, compressed and cached, with
-processes grouped by the app that owns them, so a browser reads as one row
-instead of forty. Quit asks nicely; Force Quit does not.
+Everything in `/Applications` and `~/Applications` with its version, size, and
+the date you last opened it. Sort by size to find what is costing you, or by last
+opened to find what you have forgotten about. Removing an app also finds the
+support files it scattered through your Library folders, which a plain
+drag-to-Trash leaves behind — often far larger than the app itself.
 
-**Storage** — disk capacity, plus the directories that quietly accumulate
-gigabytes: caches, logs, Xcode derived data, package-manager downloads. Each is
-labelled *Safe to clear* or *Review first*. There is also an on-demand
-measurement of every top-level folder in your home directory.
+Apps on the sealed system volume are listed for context and marked *Protected*.
 
-**Ports** — every TCP port in the LISTEN state, which process owns it, and
-whether it is reachable from your network or only from this Mac.
+![Applications](docs/screenshots/applications.png)
+
+### Memory
+
+A live breakdown of app memory, wired, compressed and cached, with processes
+grouped by the app that owns them — so a browser reads as one row instead of
+forty. Quit asks nicely; Force Quit does not.
+
+![Memory](docs/screenshots/memory.png)
+
+### Storage
+
+Disk capacity, plus the directories that quietly accumulate gigabytes: caches,
+logs, Xcode derived data, package-manager downloads. Each is labelled *Safe to
+clear* or *Review first*. There is also an on-demand measurement of every
+top-level folder in your home directory.
+
+![Storage](docs/screenshots/storage.png)
+
+### Ports
+
+Every TCP port in the LISTEN state, which process owns it, and whether it is
+reachable from your network or only from this Mac.
+
+![Ports](docs/screenshots/ports.png)
 
 ## How removal works
 
