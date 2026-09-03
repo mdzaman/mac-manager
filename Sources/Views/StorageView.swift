@@ -38,7 +38,7 @@ struct StorageView: View {
                         targets: review)
 
             trashCard(p: p)
-            homeCard(p: p)
+            exploreCard(p: p)
         }
         .alert(item: $confirmClear) { target in
             Alert(title: Text("Clear \(target.name)?"),
@@ -159,56 +159,26 @@ struct StorageView: View {
         }
     }
 
-    private func homeCard(p: Palette) -> some View {
+    /// The catalogue only covers folders the app knows by name. Everything else
+    /// lives behind the explorer, which is also the only way to see the hidden
+    /// folders Finder refuses to list.
+    private func exploreCard(p: Palette) -> some View {
         Card {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Where the rest of your space went")
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 16))
+                    .foregroundColor(p.series1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Still missing space?")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(p.textPrimary)
-                    Text("Measures every top-level folder in your home directory. Takes a minute or two.")
+                    Text("The list above only covers folders Mac Manager knows by name. To find everything else — including dot-folders and the hidden ~/Library that Finder will not show you — browse your disk folder by folder, sorted biggest first.")
                         .font(.system(size: 11))
                         .foregroundColor(p.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button(action: { self.state.storage.scanHomeFolder() }) {
-                    Text(state.storage.isScanningHome ? "Measuring…" : "Measure home folder")
-                }
-                .disabled(state.storage.isScanningHome)
-            }
-
-            if !state.storage.homeBreakdown.isEmpty {
-                Divider()
-                let maxBytes = state.storage.homeBreakdown.map { $0.sizeBytes ?? 0 }.max() ?? 1
-                ForEach(state.storage.homeBreakdown) { item in
-                    HStack(spacing: 10) {
-                        Text(item.name)
-                            .font(.system(size: 12))
-                            .foregroundColor(p.textPrimary)
-                            .frame(width: 160, alignment: .leading)
-                            .lineLimit(1)
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                RoundedRectangle(cornerRadius: 3).fill(p.track).frame(height: 8)
-                                RoundedRectangle(cornerRadius: 3)
-                                    .fill(p.series1)
-                                    .frame(width: max(2, geo.size.width * CGFloat(Double(item.sizeBytes ?? 0) / Double(max(maxBytes, 1)))),
-                                           height: 8)
-                            }
-                            .frame(height: geo.size.height, alignment: .center)
-                        }
-                        .frame(height: 16)
-                        Text(Fmt.bytes(item.sizeBytes))
-                            .font(.system(size: 11, design: .rounded))
-                            .foregroundColor(p.textPrimary)
-                            .frame(width: 74, alignment: .trailing)
-                        Button(action: { StorageScanner.reveal(item.path) }) {
-                            Image(systemName: "folder").font(.system(size: 10)).foregroundColor(p.textMuted)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                    .padding(.vertical, 1)
-                }
+                Button(action: { self.state.section = .explore }) { Text("Open Explore") }
             }
         }
     }

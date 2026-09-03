@@ -200,3 +200,56 @@ struct PortEntry: Identifiable {
         }
     }
 }
+
+// MARK: - Explorer
+
+/// One entry in the disk explorer: a file or folder with its measured size.
+///
+/// Unlike Finder, the explorer lists dot-prefixed names and items carrying the
+/// hidden flag — those are exactly the ones that hide large caches.
+struct ExploreEntry: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let isDirectory: Bool
+    let isHidden: Bool
+    var sizeBytes: Int64
+    /// Folders are listed immediately and measured afterwards, because `du`
+    /// has to walk the whole subtree before it can report a total.
+    var measured: Bool
+
+    var displayPath: String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+}
+
+/// A place worth jumping straight to. `~/Library` is the headline case: Finder
+/// hides it, and it is usually the largest thing in a home folder.
+struct ExploreShortcut: Identifiable {
+    var id: String { return path }
+
+    let label: String
+    let icon: String
+    let path: String
+
+    static var all: [ExploreShortcut] {
+        let home = NSHomeDirectory()
+        return [
+            ExploreShortcut(label: "Home", icon: "house", path: home),
+            ExploreShortcut(label: "Library", icon: "eye.slash", path: home + "/Library"),
+            ExploreShortcut(label: "Containers", icon: "shippingbox",
+                            path: home + "/Library/Containers"),
+            ExploreShortcut(label: "App Support", icon: "gearshape",
+                            path: home + "/Library/Application Support"),
+            ExploreShortcut(label: "Caches", icon: "clock.arrow.circlepath",
+                            path: home + "/Library/Caches"),
+            ExploreShortcut(label: "Developer", icon: "hammer",
+                            path: home + "/Library/Developer"),
+            ExploreShortcut(label: "Temp files", icon: "tray",
+                            path: NSTemporaryDirectory()),
+        ]
+    }
+}
