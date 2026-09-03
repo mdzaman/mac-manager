@@ -23,7 +23,7 @@ cp -R "build/Mac Manager.app" /Applications/
 
 Requires the Xcode Command Line Tools (`xcode-select --install`). Nothing else.
 
-## The five tabs
+## The six tabs
 
 **Overview** *(above)* — memory, storage, app count and open ports at a glance,
 plus large apps you have not opened in over six months.
@@ -56,6 +56,21 @@ clear* or *Review first*. There is also an on-demand measurement of every
 top-level folder in your home directory.
 
 ![Storage](docs/screenshots/storage.png)
+
+### Explore
+
+Where the missing space actually is. Finder hides `~/Library` and every
+dot-folder, which is precisely where large caches accumulate — on the machine
+this was built on, **87 of 133 items in the home folder were hidden**.
+
+Explore lists everything: dot-names, hidden-flagged folders, the lot. Sorted
+biggest first, with a Hidden badge on anything Finder omits, breadcrumbs to
+drill down, and shortcuts straight to Library, Containers, Application Support,
+Caches, Developer and the temp folder.
+
+Folders are listed instantly and measured afterwards. A folder's size is not
+known until its whole tree has been walked, and `~/Library` can take minutes —
+so you get the listing immediately and the sizes fill in as they arrive.
 
 ### Ports
 
@@ -119,6 +134,7 @@ Sources/
   Models/                  data types
   Services/                AppScanner, MemoryMonitor, StorageScanner, PortScanner
   Views/                   one file per tab, plus the uninstall sheet
+                           (ExploreView is the hidden-file browser)
 Tools/MakeIcon.swift       app icon, drawn in code
 build.sh                   compile, bundle, sign
 ```
