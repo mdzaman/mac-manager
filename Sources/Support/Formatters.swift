@@ -24,6 +24,21 @@ enum Fmt {
         return String(format: "%.2f GB", g)
     }
 
+    /// Signed change, e.g. "+1.2 GB" or "−340 MB". `bytes` clamps negatives to
+    /// zero, which is right for sizes and wrong for deltas.
+    static func signedBytes(_ value: Int64) -> String {
+        if value == 0 { return "no change" }
+        let magnitude = byteFormatter.string(fromByteCount: abs(value))
+        return (value > 0 ? "+" : "−") + magnitude
+    }
+
+    static func signedPercent(_ fraction: Double?) -> String {
+        guard let fraction = fraction else { return "" }
+        let pct = fraction * 100
+        if abs(pct) < 0.1 { return "" }
+        return String(format: "%@%.0f%%", pct > 0 ? "+" : "−", abs(pct))
+    }
+
     static func percent(_ fraction: Double) -> String {
         return String(format: "%.0f%%", max(0, min(1, fraction)) * 100)
     }

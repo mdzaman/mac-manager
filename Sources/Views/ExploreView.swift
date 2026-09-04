@@ -171,6 +171,8 @@ struct ExploreView: View {
                 .foregroundColor(p.textMuted).frame(width: 96, alignment: .leading)
             Text("SIZE").font(.system(size: 10, weight: .semibold))
                 .foregroundColor(p.textMuted).frame(width: 84, alignment: .trailing)
+            Text("CHANGE").font(.system(size: 10, weight: .semibold))
+                .foregroundColor(p.textMuted).frame(width: 86, alignment: .trailing)
             Text("").frame(width: 96)
         }
         .padding(.horizontal, 14)
@@ -309,6 +311,27 @@ struct ExploreRow: View {
                 }
             }
             .frame(width: 84, alignment: .trailing)
+
+            // Change since this folder was last measured. Direction is carried
+            // by an arrow and a sign, so colour is never doing the work alone.
+            Group {
+                if let delta = entry.deltaBytes, delta != 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: delta > 0 ? "arrow.up.right" : "arrow.down.right")
+                            .font(.system(size: 8, weight: .semibold))
+                        Text(Fmt.signedBytes(delta))
+                            .font(.system(size: 11, design: .rounded))
+                    }
+                    .foregroundColor(delta > 0 ? p.serious : p.good)
+                    .help(entry.deltaSince.map { "Since \(Fmt.date($0))" } ?? "")
+                } else if entry.deltaBytes != nil {
+                    Text("no change").font(.system(size: 10)).foregroundColor(p.textMuted)
+                } else {
+                    Text("—").font(.system(size: 10)).foregroundColor(p.textMuted)
+                        .help("First measurement — revisit to see change")
+                }
+            }
+            .frame(width: 86, alignment: .trailing)
 
             HStack(spacing: 5) {
                 Button(action: onReveal) {

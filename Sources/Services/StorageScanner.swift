@@ -295,15 +295,28 @@ final class StorageScanner: ObservableObject {
             return
         }
 
-        // Phase two: measure, then re-sort biggest first.
+        // Phase two: measure, record to history, then re-sort biggest first.
         work.async {
             let sizes = StorageScanner.directoryChildSizes(of: target)
+
+            var byFullPath: [String: Int64] = [:]
+            for entry in listing where entry.isDirectory {
+                byFullPath[entry.path] = sizes[entry.name] ?? 0
+            }
+            // Recording before reading the delta means `previous` is the prior
+            // visit, not this one.
+            SnapshotStore.shared.record(byFullPath)
+
             DispatchQueue.main.async {
                 guard generation == self.exploreGeneration else { return }
                 var measured = listing
                 for index in measured.indices where measured[index].isDirectory {
                     measured[index].sizeBytes = sizes[measured[index].name] ?? 0
                     measured[index].measured = true
+                    if let change = SnapshotStore.shared.delta(for: measured[index].path) {
+                        measured[index].deltaBytes = change.bytes
+                        measured[index].deltaSince = change.since
+                    }
                 }
                 self.exploreEntries = measured.sorted { $0.sizeBytes > $1.sizeBytes }
                 self.isExploring = false
@@ -403,6 +416,61 @@ final class StorageScanner: ObservableObject {
             sizes[name] = kilobytes * 1024
         }
         return sizes
+    }
+
+    // MARK: - Recent changes
+
+    @Published private(set) var recentFiles: [RecentFile] = []
+    @Published private(set) var isScanningRecent = false
+    @Published private(set) var recentRoot: String = NSHomeDirectory()
+    @Published private(set) var recentNote: String?
+
+    /// Finds large files modified in the last `days`. This answers "what is
+    /// growing" with no prior snapshot at all, which matters the first time the
+    /// app is run — history only becomes useful on the second measurement.
+    func scanRecentChanges(root: String, days: Int, minimumMB: Int) {
+        if isScanningRecent { return }
+        isScanningRecent = true
+        recentRoot = root
+        recentFiles = []
+        recentNote = nil
+
+        work.async {
+            let found = StorageScanner.findRecentFiles(root: root, days: days, minimumMB: minimumMB)
+            DispatchQueue.main.async {
+                self.recentFiles = found
+                self.isScanningRecent = false
+                if found.isEmpty {
+                    self.recentNote = "No files over \(minimumMB) MB were modified in the last \(days) days under this folder."
+                }
+            }
+        }
+    }
+
+    /// `find` walks metadata only — no file contents — so it is far quicker
+    /// than measuring folder totals.
+    static func findRecentFiles(root: String, days: Int, minimumMB: Int) -> [RecentFile] {
+        let result = Shell.run("/usr/bin/find",
+                               [root,
+                                "-type", "f",
+                                "-mtime", "-\(days)",
+                                "-size", "+\(minimumMB)M"])
+
+        var files: [RecentFile] = []
+        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
+                                         .contentModificationDateKey]
+
+        for path in result.out.components(separatedBy: "\n") {
+            if path.isEmpty { continue }
+            let url = URL(fileURLWithPath: path)
+            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
+            let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+            files.append(RecentFile(path: path,
+                                    sizeBytes: size,
+                                    modified: values.contentModificationDate ?? Date()))
+        }
+
+        return files.sorted { $0.sizeBytes > $1.sizeBytes }
     }
 
     // MARK: - Clearing

@@ -7,6 +7,7 @@ enum Section: String, CaseIterable, Identifiable {
     case memory = "Memory"
     case storage = "Storage"
     case explore = "Explore"
+    case growth = "Growth"
     case ports = "Ports"
 
     var id: String { return rawValue }
@@ -18,6 +19,7 @@ enum Section: String, CaseIterable, Identifiable {
         case .memory: return "memorychip"
         case .storage: return "internaldrive"
         case .explore: return "eye.slash"
+        case .growth: return "chart.line.uptrend.xyaxis"
         case .ports: return "network"
         }
     }
@@ -29,6 +31,7 @@ enum Section: String, CaseIterable, Identifiable {
         case .memory: return "What is using your memory, grouped by app."
         case .storage: return "Where your disk space went, and what is safe to reclaim."
         case .explore: return "Drill into any folder — including the hidden ones Finder will not show you."
+        case .growth: return "What grew, what shrank, and which files changed recently."
         case .ports: return "Which programs are listening for network connections."
         }
     }
@@ -126,6 +129,7 @@ struct RootView: View {
         case .memory: MemoryView()
         case .storage: StorageView()
         case .explore: ExploreView()
+        case .growth: GrowthView()
         case .ports: PortsView()
         }
     }

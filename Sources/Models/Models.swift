@@ -218,6 +218,9 @@ struct ExploreEntry: Identifiable {
     /// Folders are listed immediately and measured afterwards, because `du`
     /// has to walk the whole subtree before it can report a total.
     var measured: Bool
+    /// Change since this folder was last measured, when there is a baseline.
+    var deltaBytes: Int64? = nil
+    var deltaSince: Date? = nil
 
     var displayPath: String {
         let home = NSHomeDirectory()
@@ -251,5 +254,58 @@ struct ExploreShortcut: Identifiable {
             ExploreShortcut(label: "Temp files", icon: "tray",
                             path: NSTemporaryDirectory()),
         ]
+    }
+}
+
+// MARK: - Growth
+
+/// A folder that changed size between two measurements.
+struct GrowthRow: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let currentBytes: Int64
+    let previousBytes: Int64
+    let measuredAt: Date
+    let baselineAt: Date
+
+    var changeBytes: Int64 { return currentBytes - previousBytes }
+    var isGrowth: Bool { return changeBytes > 0 }
+
+    var name: String { return (path as NSString).lastPathComponent }
+
+    var displayPath: String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+
+    /// Percentage change, or nil when there was nothing there to grow from.
+    var changeFraction: Double? {
+        guard previousBytes > 0 else { return nil }
+        return Double(changeBytes) / Double(previousBytes)
+    }
+}
+
+/// A file changed recently — the direct answer to "what is growing right now",
+/// available without any prior snapshot.
+struct RecentFile: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let sizeBytes: Int64
+    let modified: Date
+
+    var name: String { return (path as NSString).lastPathComponent }
+
+    var folder: String {
+        return (path as NSString).deletingLastPathComponent
+    }
+
+    var displayFolder: String {
+        let home = NSHomeDirectory()
+        let dir = folder
+        if dir.hasPrefix(home) { return "~" + dir.dropFirst(home.count) }
+        return dir
     }
 }
