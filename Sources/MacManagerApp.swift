@@ -12,6 +12,7 @@ enum Section: String, CaseIterable, Identifiable {
     case find = "Find"
     case organize = "Organize"
     case backup = "Backup"
+    case duplicates = "Duplicates"
 
     var id: String { return rawValue }
 
@@ -27,13 +28,14 @@ enum Section: String, CaseIterable, Identifiable {
         case .find: return "sparkle.magnifyingglass"
         case .organize: return "folder.badge.gearshape"
         case .backup: return "externaldrive.badge.timemachine"
+        case .duplicates: return "doc.on.doc"
         }
     }
 
     /// Which sidebar group this belongs to.
     var group: String {
         switch self {
-        case .find, .organize, .backup: return "Files"
+        case .find, .organize, .backup, .duplicates: return "Files"
         default: return "System"
         }
     }
@@ -49,6 +51,7 @@ enum Section: String, CaseIterable, Identifiable {
         case .find: return "Search your files by meaning as well as by name, and tag them."
         case .organize: return "Sort a messy folder into a structure — previewed first, undoable after."
         case .backup: return "Mirror your folders to an external drive, keeping old versions."
+        case .duplicates: return "Identical copies, and files sharing a name but not their contents."
         case .ports: return "Which programs are listening for network connections."
         }
     }
@@ -64,6 +67,8 @@ final class AppState: ObservableObject {
     let organizer = Organizer()
     let search = SearchIndex()
     let backup = BackupService()
+    let duplicates = DuplicateFinder()
+    let exclusions = ExclusionRules()
 
     @Published var section: Section = .dashboard
 
@@ -82,7 +87,13 @@ final class AppState: ObservableObject {
             organizer.objectWillChange,
             search.objectWillChange,
             backup.objectWillChange,
+            duplicates.objectWillChange,
+            exclusions.objectWillChange,
         ]
+        // One exclusion list, shared by everything that walks the disk.
+        search.exclusions = exclusions
+        backup.exclusions = exclusions
+
         for source in sources {
             source
                 .receive(on: RunLoop.main)
@@ -159,6 +170,7 @@ struct RootView: View {
         case .find: FindView()
         case .organize: OrganizeView()
         case .backup: BackupView()
+        case .duplicates: DuplicatesView()
         }
     }
 }

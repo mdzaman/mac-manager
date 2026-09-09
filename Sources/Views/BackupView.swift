@@ -6,6 +6,7 @@ struct BackupView: View {
     @Environment(\.colorScheme) private var scheme
 
     @State private var confirmRun = false
+    @State private var showExclusions = false
 
     var body: some View {
         let p = Palette(scheme)
@@ -15,6 +16,9 @@ struct BackupView: View {
                     subtitle: Section.backup.blurb,
                     trailing: {
             HStack(spacing: 10) {
+                Button(action: { self.showExclusions = true }) {
+                    Text("Exclusions (\(self.state.exclusions.activeCount))")
+                }
                 Button(action: { backup.refreshVolumes() }) { Text("Find drives") }
                 Button(action: { backup.preview() }) {
                     Text(backup.isScanning ? "Checking…" : "Preview")
@@ -41,13 +45,17 @@ struct BackupView: View {
                 }
             }
 
-            if !backup.log.isEmpty { logCard(p: p, backup: backup) }
+            if backup.isRunning || backup.lastRun != nil || !backup.log.isEmpty {
+                progressCard(p: p, backup: backup)
+            }
+            if !backup.sourceStates.isEmpty { sourceStatesCard(p: p, backup: backup) }
             if !backup.changes.isEmpty { changeList(p: p, backup: backup) }
 
             versionsCard(p: p, backup: backup)
             safetyNote(p: p, backup: backup)
         }
         .onAppear { if backup.volumes.isEmpty { backup.refreshVolumes() } }
+        .sheet(isPresented: $showExclusions) { ExclusionsSheet(rules: self.state.exclusions) }
         .alert(isPresented: $confirmRun) {
             Alert(title: Text("Back up to \(state.backup.selectedVolume?.name ?? "drive")?"),
                   message: Text(runDescription),
@@ -194,21 +202,185 @@ struct BackupView: View {
         }
     }
 
-    private func logCard(p: Palette, backup: BackupService) -> some View {
+    /// Live progress: overall bar, the file in flight, throughput and ETA.
+    private func progressCard(p: Palette, backup: BackupService) -> some View {
         Card {
-            HStack(spacing: 6) {
-                if backup.isRunning { ProgressView().scaleEffect(0.4).frame(width: 14, height: 14) }
-                Text(backup.isRunning ? "Backing up…" : "Last run")
-                    .font(.system(size: 12, weight: .semibold)).foregroundColor(p.textPrimary)
+            HStack(spacing: 8) {
+                if backup.isRunning {
+                    ProgressView().scaleEffect(0.45).frame(width: 16, height: 16)
+                }
+                Text(backup.isRunning ? "Backing up" : "Last run")
+                    .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
                 Spacer()
-                if let last = backup.lastRun {
+                if backup.isRunning {
+                    Text(Fmt.percent(backup.progress))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundColor(p.series1)
+                } else if let last = backup.lastRun {
                     Text(Fmt.relative(last)).font(.system(size: 11)).foregroundColor(p.textSecondary)
                 }
             }
-            ForEach(Array(backup.log.enumerated()), id: \.offset) { _, line in
-                Text(line).font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(line.contains("⚠︎") ? p.critical : p.textSecondary)
+
+            // Progress is measured in bytes, not files: one file can be a
+            // gigabyte and the next a kilobyte, so a file-count bar lies.
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 5).fill(p.track).frame(height: 10)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(backup.isRunning ? p.series1 : p.good)
+                        .frame(width: max(4, geo.size.width * CGFloat(backup.progress)), height: 10)
+                }
+                .frame(height: geo.size.height, alignment: .center)
             }
+            .frame(height: 14)
+
+            HStack(alignment: .top, spacing: 0) {
+                StatTile(label: "Files copied",
+                         value: "\(backup.copiedFiles)",
+                         detail: "of \(backup.pendingNew + backup.pendingUpdated) to copy")
+                Divider().frame(height: 38)
+                StatTile(label: "Data copied",
+                         value: Fmt.bytes(backup.copiedBytes),
+                         detail: "of \(Fmt.bytes(backup.totalPendingBytes))")
+                Divider().frame(height: 38)
+                StatTile(label: "Speed",
+                         value: backup.bytesPerSecond > 0
+                            ? Fmt.bytes(Int64(backup.bytesPerSecond)) + "/s" : "—",
+                         detail: backup.isRunning ? "current transfer rate" : "finished")
+                Divider().frame(height: 38)
+                StatTile(label: "Remaining",
+                         value: backup.estimatedRemaining.map { BackupView.duration($0) } ?? "—",
+                         detail: backup.isRunning ? "estimated" : "done")
+            }
+
+            if let file = backup.currentFile {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.right.doc.on.clipboard")
+                        .font(.system(size: 10)).foregroundColor(p.series1)
+                    Text(file)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(p.textSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(p.track.opacity(0.5)))
+            }
+
+            if !backup.log.isEmpty {
+                Divider()
+                ForEach(Array(backup.log.suffix(6).enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(line.contains("⚠︎") ? p.critical : p.textSecondary)
+                }
+            }
+        }
+    }
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return String(format: "%.0fs", seconds) }
+        if seconds < 3600 { return String(format: "%.0fm %02.0fs", seconds / 60, seconds.truncatingRemainder(dividingBy: 60)) }
+        return String(format: "%.0fh %02.0fm", seconds / 3600, (seconds / 60).truncatingRemainder(dividingBy: 60))
+    }
+
+    /// Source against target, folder by folder, so the two sides can be
+    /// compared without leaving the screen.
+    private func sourceStatesCard(p: Palette, backup: BackupService) -> some View {
+        Card(padding: 0, spacing: 0) {
+            HStack {
+                Text("This Mac vs the drive")
+                    .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.top, 13).padding(.bottom, 10)
+
+            HStack(spacing: 10) {
+                Text("FOLDER").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(width: 96, alignment: .leading)
+                Text("ON THIS MAC").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(width: 130, alignment: .leading)
+                Text("ON THE DRIVE").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(width: 130, alignment: .leading)
+                Text("TO COPY").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(width: 120, alignment: .leading)
+                Text("PROGRESS").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(maxWidth: .infinity, alignment: .leading)
+                Text("STATUS").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(p.textMuted).frame(width: 78, alignment: .trailing)
+            }
+            .padding(.horizontal, 14).padding(.bottom, 7)
+
+            Divider()
+
+            ForEach(Array(backup.sourceStates.enumerated()), id: \.element.id) { index, state in
+                HStack(spacing: 10) {
+                    Text(state.name)
+                        .font(.system(size: 12, weight: .medium)).foregroundColor(p.textPrimary)
+                        .frame(width: 96, alignment: .leading).lineLimit(1)
+
+                    sideColumn(p: p, files: state.sourceFiles, bytes: state.sourceBytes)
+                        .frame(width: 130, alignment: .leading)
+                    sideColumn(p: p, files: state.targetFiles, bytes: state.targetBytes)
+                        .frame(width: 130, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(state.pendingFiles == 0 ? "nothing" : "\(state.pendingFiles) files")
+                            .font(.system(size: 11))
+                            .foregroundColor(state.pendingFiles == 0 ? p.good : p.textPrimary)
+                        if state.pendingBytes > 0 {
+                            Text(Fmt.bytes(state.pendingBytes))
+                                .font(.system(size: 9)).foregroundColor(p.textMuted)
+                        }
+                    }
+                    .frame(width: 120, alignment: .leading)
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3).fill(p.track).frame(height: 6)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(state.status == .failed ? p.critical
+                                        : (state.status == .done ? p.good : p.series1))
+                                .frame(width: max(2, geo.size.width * CGFloat(state.progress)), height: 6)
+                        }
+                        .frame(height: geo.size.height, alignment: .center)
+                    }
+                    .frame(height: 18)
+                    .frame(maxWidth: .infinity)
+
+                    Text(state.status.rawValue)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(statusColor(p: p, status: state.status))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 3)
+                                        .fill(statusColor(p: p, status: state.status).opacity(0.14)))
+                        .frame(width: 78, alignment: .trailing)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 7)
+                .background(index % 2 == 1 ? p.track.opacity(0.28) : Color.clear)
+
+                if index < backup.sourceStates.count - 1 { Divider().padding(.leading, 14) }
+            }
+        }
+    }
+
+    private func sideColumn(p: Palette, files: Int?, bytes: Int64?) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if let files = files {
+                Text("\(files) files").font(.system(size: 11)).foregroundColor(p.textPrimary)
+                Text(Fmt.bytes(bytes)).font(.system(size: 9)).foregroundColor(p.textMuted)
+            } else {
+                Text("measuring…").font(.system(size: 10)).foregroundColor(p.textMuted)
+            }
+        }
+    }
+
+    private func statusColor(p: Palette, status: BackupSourceState.Status) -> Color {
+        switch status {
+        case .done: return p.good
+        case .failed: return p.critical
+        case .running: return p.series1
+        case .measuring: return p.series2
+        default: return p.textMuted
         }
     }
 

@@ -10,6 +10,7 @@ struct FindView: View {
     @State private var tagFilter: String?
     @State private var taggingPath: String?
     @State private var newTag = ""
+    @State private var showExclusions = false
 
     var body: some View {
         let p = Palette(scheme)
@@ -29,6 +30,9 @@ struct FindView: View {
                 .pickerStyle(SegmentedPickerStyle())
                 .frame(width: 190)
                 .help("How many files to index")
+                Button(action: { self.showExclusions = true }) {
+                    Text("Exclusions (\(self.state.exclusions.activeCount))")
+                }
                 Button(action: { self.state.search.rebuild() }) {
                     Text(state.search.isIndexing ? "Indexing…" : "Rebuild index")
                 }
@@ -69,6 +73,7 @@ struct FindView: View {
             explainer(p: p)
         }
         .onAppear { state.search.loadIfNeeded() }
+        .sheet(isPresented: $showExclusions) { ExclusionsSheet(rules: self.state.exclusions) }
         .sheet(item: Binding(
             get: { taggingPath.map { TagTarget(path: $0) } },
             set: { taggingPath = $0?.path })) { target in

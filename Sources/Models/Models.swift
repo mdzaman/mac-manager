@@ -514,3 +514,107 @@ struct SearchHit: Identifiable {
     let score: Double
     let matchedOnName: Bool
 }
+
+// MARK: - Duplicates
+
+/// One copy of a file inside a duplicate group.
+struct DuplicateFile: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let sizeBytes: Int64
+    let modified: Date
+    var selected: Bool = false
+
+    var displayFolder: String {
+        let home = NSHomeDirectory()
+        let dir = (path as NSString).deletingLastPathComponent
+        if dir.hasPrefix(home) { return "~" + dir.dropFirst(home.count) }
+        return dir
+    }
+}
+
+/// Files that belong together — either byte-identical, or sharing a name.
+struct DuplicateGroup: Identifiable {
+    var id: String { return key }
+
+    let key: String
+    let kind: Kind
+    var files: [DuplicateFile]
+
+    enum Kind {
+        /// Byte-for-byte identical, whatever they are called.
+        case identical
+        /// Same filename, different contents — usually versions of one thing.
+        case sameName
+
+        var title: String {
+            switch self {
+            case .identical: return "Identical files"
+            case .sameName: return "Same name, different contents"
+            }
+        }
+    }
+
+    /// Size of one copy.
+    var unitBytes: Int64 { return files.map { $0.sizeBytes }.max() ?? 0 }
+
+    /// Space that would come back if only one copy were kept. Meaningless for
+    /// same-name groups, where the files are genuinely different.
+    var reclaimableBytes: Int64 {
+        guard kind == .identical, files.count > 1 else { return 0 }
+        return unitBytes * Int64(files.count - 1)
+    }
+
+    var selectedCount: Int { return files.filter { $0.selected }.count }
+
+    var newest: DuplicateFile? { return files.max { $0.modified < $1.modified } }
+    var oldest: DuplicateFile? { return files.min { $0.modified < $1.modified } }
+
+    /// A group where every copy is selected would delete the file entirely.
+    var wouldDeleteAll: Bool { return selectedCount >= files.count && !files.isEmpty }
+}
+
+/// Live state of one folder being backed up, on both sides.
+struct BackupSourceState: Identifiable {
+    var id: String { return sourcePath }
+
+    let sourcePath: String
+    let name: String
+
+    /// What is on this Mac.
+    var sourceFiles: Int?
+    var sourceBytes: Int64?
+    /// What is already on the drive.
+    var targetFiles: Int?
+    var targetBytes: Int64?
+    /// What a run would copy.
+    var pendingFiles: Int = 0
+    var pendingBytes: Int64 = 0
+    /// What this run has copied so far.
+    var copiedFiles: Int = 0
+    var copiedBytes: Int64 = 0
+
+    var status: Status = .idle
+
+    enum Status: String {
+        case idle = "Not checked"
+        case measuring = "Measuring"
+        case ready = "Ready"
+        case running = "Copying"
+        case done = "Up to date"
+        case failed = "Failed"
+    }
+
+    var progress: Double {
+        guard pendingBytes > 0 else { return status == .done ? 1 : 0 }
+        return min(1, Double(copiedBytes) / Double(pendingBytes))
+    }
+
+    /// How much of the source is already mirrored.
+    var mirroredFraction: Double? {
+        guard let source = sourceBytes, source > 0, let target = targetBytes else { return nil }
+        return min(1, Double(target) / Double(source))
+    }
+}

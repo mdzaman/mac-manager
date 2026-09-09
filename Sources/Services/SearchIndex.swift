@@ -39,12 +39,13 @@ final class SearchIndex: ObservableObject {
             .filter { FileManager.default.fileExists(atPath: $0) }
     }
 
-    /// Build folders and package internals are noise in a file search.
-    private static let skipDirectories: Set<String> = [
-        "node_modules", ".git", ".svn", "Library", ".Trash", "__pycache__",
-        ".venv", "venv", "DerivedData", ".build", "Pods", ".next", "dist",
-        ".cache", ".gradle", "vendor", ".terraform",
-    ]
+    /// Always skipped regardless of the user's exclusion list — indexing your
+    /// own Library or Trash is never what you meant.
+    private static let alwaysSkip: Set<String> = ["Library", ".Trash", ".build", "vendor"]
+
+    /// The shared exclusion list, injected so Find, Backup and Duplicates all
+    /// honour the same rules.
+    var exclusions: ExclusionRules?
 
     /// How many files to index. Embedding runs at roughly 1,600 files/sec
     /// across cores, and each file costs 512 bytes of memory, so 250,000 files
@@ -94,6 +95,7 @@ final class SearchIndex: ObservableObject {
 
         let targets = roots
         let limit = maxFiles
+        let rules = exclusions
         work.async {
             var found: [IndexedFile] = []
             let fm = FileManager.default
@@ -114,13 +116,15 @@ final class SearchIndex: ObservableObject {
                                                                    .contentModificationDateKey])
 
                     if values?.isDirectory == true {
-                        if SearchIndex.skipDirectories.contains(name) || name.hasPrefix(".") {
+                        if SearchIndex.alwaysSkip.contains(name) || name.hasPrefix(".")
+                            || rules?.excludes(name: name, path: url.path) == true {
                             walker.skipDescendants()
                         }
                         continue
                     }
 
                     if name.hasPrefix(".") { continue }
+                    if rules?.excludes(name: name, path: url.path) == true { continue }
 
                     found.append(IndexedFile(
                         path: url.path,

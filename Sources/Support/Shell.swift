@@ -47,6 +47,74 @@ enum Shell {
         return run("/bin/sh", ["-c", command]).out
     }
 
+    /// Runs a command and delivers stdout one line at a time as it arrives,
+    /// rather than collecting everything and returning at the end.
+    ///
+    /// Needed for anything long enough that the user deserves to see progress —
+    /// a backup can run for minutes, and a frozen window with no output is
+    /// indistinguishable from a hang.
+    ///
+    /// Reads to EOF in a loop rather than using `readabilityHandler` with
+    /// `terminationHandler`: those two race, and the process can be reported as
+    /// finished while output is still buffered in the pipe. Draining to EOF
+    /// first guarantees every line is delivered before `completion` runs.
+    @discardableResult
+    static func stream(_ launchPath: String,
+                       _ args: [String],
+                       onLine: @escaping (String) -> Void,
+                       completion: @escaping (Int32, String) -> Void) -> Process? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = args
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        process.standardInput = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            completion(-1, "\(error)")
+            return nil
+        }
+
+        // stderr is drained on its own queue so a chatty error stream cannot
+        // fill its buffer and deadlock the child while we read stdout.
+        var errorText = ""
+        let errorDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            errorText = String(data: data, encoding: .utf8) ?? ""
+            errorDone.signal()
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let handle = outPipe.fileHandleForReading
+            var pending = ""
+
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }  // EOF
+                guard let text = String(data: data, encoding: .utf8) else { continue }
+
+                pending += text
+                var lines = pending.components(separatedBy: "\n")
+                // Whatever follows the last newline is an incomplete line.
+                pending = lines.removeLast()
+                for line in lines where !line.isEmpty { onLine(line) }
+            }
+            if !pending.isEmpty { onLine(pending) }
+
+            process.waitUntilExit()
+            errorDone.wait()
+            completion(process.terminationStatus, errorText)
+        }
+
+        return process
+    }
+
     /// Runs AppleScript. Used as the fallback path for privileged file moves,
     /// where Finder puts up its own authentication sheet.
     @discardableResult

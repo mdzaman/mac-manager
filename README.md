@@ -72,6 +72,20 @@ Folders are listed instantly and measured afterwards. A folder's size is not
 known until its whole tree has been walked, and `~/Library` can take minutes —
 so you get the listing immediately and the sizes fill in as they arrive.
 
+### Duplicates
+
+Finds files that are byte-identical under different names, and files that share
+a name but differ inside.
+
+Comparison is by content, never by name. Three passes, cheapest first: group by
+exact size, compare the first 64 KB, then hash the whole file for anything still
+matching — so nothing is called identical until every byte has been checked. Two
+files of the same size with different contents are correctly not duplicates.
+
+Files sharing a name but differing inside are listed separately, because those
+are *versions* rather than duplicates and deleting the wrong one loses work.
+Nothing is preselected there. Everything removed goes to the Trash.
+
 ### Ports
 
 Every TCP port in the LISTEN state, which process owns it, and whether it is
@@ -125,6 +139,11 @@ Mirrors chosen folders to an external drive using rsync.
 - **Always previewable.** A dry run lists exactly what would be copied first.
 - **Versioned.** Replaced files move into a timestamped folder rather than being
   overwritten, so previous versions stay recoverable.
+- **Reports progress in detail.** Live file count, bytes copied against the
+  total, current file, transfer rate and estimated time, plus a per-folder
+  comparison of what is on this Mac against what is on the drive. Progress is
+  measured in bytes rather than files, because one file can be a gigabyte and
+  the next a kilobyte.
 - **Skips build junk.** On the machine this was built on, excluding
   `node_modules` and friends took one folder from **679,767 files to 60,752**,
   and the scan from 44 seconds to 3.
@@ -135,6 +154,21 @@ Mirrors chosen folders to an external drive using rsync.
 It is a mirror with history, not a Time Machine replacement — it does not
 snapshot your whole system, and a drive that lives next to your Mac is not
 protection against fire or theft.
+
+## Exclusions
+
+One list, shared by search indexing, backups and duplicate scans — a folder not
+worth backing up is rarely worth indexing either, and separate lists drift apart.
+
+Recommended defaults cover build output (`node_modules`, `DerivedData`, `Pods`,
+virtual environments), system junk (`.DS_Store`, `Thumbs.db`, `.Spotlight-V100`)
+and caches. Judgement calls ship switched **off** rather than assumed: `.git` is
+your version history, `build` and `dist` sometimes hold real files, and disk
+images are large but often irreplaceable.
+
+Patterns follow rsync's own syntax, so the same list is handed straight to it. A
+bare name matches any file or folder called that, `*.ext` matches an extension,
+and anything containing a slash matches part of a path.
 
 ## How removal works
 

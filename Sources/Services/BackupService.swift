@@ -25,10 +25,40 @@ final class BackupService: ObservableObject {
     @Published private(set) var pendingNew = 0
     @Published private(set) var pendingUpdated = 0
 
+    /// Per-folder state on both sides, and live progress during a run.
+    @Published private(set) var sourceStates: [BackupSourceState] = []
+    @Published private(set) var currentFile: String?
+    @Published private(set) var copiedFiles = 0
+    @Published private(set) var copiedBytes: Int64 = 0
+    @Published private(set) var totalPendingBytes: Int64 = 0
+    @Published private(set) var startedAt: Date?
+
+    /// Overall fraction copied, by bytes — file counts mislead when one file is
+    /// a gigabyte and the next is a kilobyte.
+    var progress: Double {
+        guard totalPendingBytes > 0 else { return 0 }
+        return min(1, Double(copiedBytes) / Double(totalPendingBytes))
+    }
+
+    var bytesPerSecond: Double {
+        guard let started = startedAt else { return 0 }
+        let elapsed = Date().timeIntervalSince(started)
+        return elapsed > 0.5 ? Double(copiedBytes) / elapsed : 0
+    }
+
+    var estimatedRemaining: TimeInterval? {
+        let rate = bytesPerSecond
+        guard rate > 0, totalPendingBytes > copiedBytes else { return nil }
+        return Double(totalPendingBytes - copiedBytes) / rate
+    }
+
     @Published var sources: [String] = BackupService.defaultSources
     @Published var destinationVolume: String?
     @Published var keepVersions: Bool = true
     @Published var skipBuildFolders: Bool = true
+
+    /// Shared exclusion list; when absent the built-in defaults apply.
+    var exclusions: ExclusionRules?
 
     /// Regenerable build output. One `node_modules` can hold a hundred
     /// thousand files, which would dominate a backup while being worthless in
@@ -118,6 +148,9 @@ final class BackupService: ObservableObject {
     // MARK: - Preview
 
     /// Dry run: what a real backup would copy, without copying anything.
+    ///
+    /// `--out-format` makes rsync report each file's byte length, so the totals
+    /// are exact rather than estimated from a file count.
     func preview() {
         guard let volume = selectedVolume else { return }
         if isScanning || isRunning { return }
@@ -125,12 +158,23 @@ final class BackupService: ObservableObject {
         isScanning = true
         changes = []
         summary = nil
+        copiedFiles = 0
+        copiedBytes = 0
+        currentFile = nil
+
+        sourceStates = sources.map {
+            BackupSourceState(sourcePath: $0, name: ($0 as NSString).lastPathComponent,
+                              status: .measuring)
+        }
 
         let sourceList = sources
+        let patterns = exclusions?.activePatterns
+
         work.async {
             var all: [BackupChange] = []
             var totalNew = 0
             var totalUpdated = 0
+            var totalBytes: Int64 = 0
 
             for source in sourceList {
                 let destination = BackupService.destinationRoot(volume: volume, source: source)
@@ -139,29 +183,71 @@ final class BackupService: ObservableObject {
                                                                destination: destination,
                                                                dryRun: true,
                                                                versionsFolder: nil,
-                                                               skipBuildJunk: self.skipBuildFolders))
-                let parsed = BackupService.parseItemized(result.out,
-                                                         prefix: (source as NSString).lastPathComponent)
+                                                               skipBuildJunk: self.skipBuildFolders,
+                                                               patterns: patterns))
+                let parsed = BackupService.parseTransfers(result.out,
+                                                          prefix: (source as NSString).lastPathComponent)
                 all.append(contentsOf: parsed.changes)
                 totalNew += parsed.newCount
                 totalUpdated += parsed.updatedCount
+                totalBytes += parsed.bytes
+
+                DispatchQueue.main.async {
+                    if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
+                        self.sourceStates[index].pendingFiles = parsed.newCount + parsed.updatedCount
+                        self.sourceStates[index].pendingBytes = parsed.bytes
+                        self.sourceStates[index].status =
+                            (parsed.newCount + parsed.updatedCount) == 0 ? .done : .ready
+                    }
+                }
+
+                // Both sides, so the numbers can be compared at a glance.
+                let targetBytes = AppScanner.size(of: destination)
+                let targetFiles = BackupService.countFiles(in: destination)
+                let sourceBytes = AppScanner.size(of: source)
+                let sourceFiles = BackupService.countFiles(in: source)
+
+                DispatchQueue.main.async {
+                    if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
+                        self.sourceStates[index].targetBytes = targetBytes
+                        self.sourceStates[index].targetFiles = targetFiles
+                        self.sourceStates[index].sourceBytes = sourceBytes
+                        self.sourceStates[index].sourceFiles = sourceFiles
+                    }
+                }
             }
 
             DispatchQueue.main.async {
                 self.changes = all
                 self.pendingNew = totalNew
                 self.pendingUpdated = totalUpdated
+                self.totalPendingBytes = totalBytes
                 self.isScanning = false
                 let total = totalNew + totalUpdated
                 self.summary = total == 0
                     ? "Everything is already backed up — nothing to copy."
-                    : "\(totalNew) new files, \(totalUpdated) changed files to copy."
+                    : "\(totalNew) new and \(totalUpdated) changed files to copy — \(Fmt.bytes(totalBytes))."
             }
         }
     }
 
+    static func countFiles(in path: String) -> Int {
+        if !FileManager.default.fileExists(atPath: path) { return 0 }
+        let result = Shell.sh("find \(BackupService.quote(path)) -type f 2>/dev/null | wc -l")
+        return Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    private static func quote(_ path: String) -> String {
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     // MARK: - Running
 
+    /// Runs the backup, reporting each file as rsync copies it.
+    ///
+    /// Sources are handled one after another rather than in parallel: they
+    /// share one drive, and competing for it would be slower as well as making
+    /// progress meaningless.
     func run(completion: @escaping (Bool) -> Void) {
         guard let volume = selectedVolume else { completion(false); return }
         if isRunning { return }
@@ -169,50 +255,94 @@ final class BackupService: ObservableObject {
         isRunning = true
         log = []
         summary = nil
+        copiedFiles = 0
+        copiedBytes = 0
+        currentFile = nil
+        startedAt = Date()
+
+        for index in sourceStates.indices {
+            sourceStates[index].copiedFiles = 0
+            sourceStates[index].copiedBytes = 0
+        }
 
         let sourceList = sources
         let versioned = keepVersions
         let skipJunk = skipBuildFolders
+        let patterns = exclusions?.activePatterns
         let stamp = BackupService.timestamp()
 
         work.async {
             var ok = true
 
             for source in sourceList {
+                let name = (source as NSString).lastPathComponent
                 let destination = BackupService.destinationRoot(volume: volume, source: source)
                 let versionsFolder = versioned
-                    ? volume.path + "/" + BackupService.backupFolderName + "/_versions/" + stamp
-                        + "/" + (source as NSString).lastPathComponent
+                    ? volume.path + "/" + BackupService.backupFolderName + "/_versions/"
+                        + stamp + "/" + name
                     : nil
 
                 DispatchQueue.main.async {
-                    self.log.append("Backing up \((source as NSString).lastPathComponent)…")
+                    self.log.append("Backing up \(name)…")
+                    if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
+                        self.sourceStates[index].status = .running
+                    }
                 }
 
-                let result = Shell.run("/usr/bin/rsync",
-                                       BackupService.arguments(source: source,
-                                                               destination: destination,
-                                                               dryRun: false,
-                                                               versionsFolder: versionsFolder,
-                                                               skipBuildJunk: skipJunk))
-                if !result.ok {
-                    ok = false
-                    let message = result.err.nonEmptyLines.first ?? "rsync exited \(result.status)"
-                    DispatchQueue.main.async { self.log.append("  ⚠︎ \(message)") }
-                } else {
-                    DispatchQueue.main.async { self.log.append("  done") }
-                }
+                // Each source runs to completion before the next starts, so the
+                // semaphore turns the async stream back into a sequence.
+                let finished = DispatchSemaphore(value: 0)
+
+                Shell.stream("/usr/bin/rsync",
+                             BackupService.arguments(source: source,
+                                                     destination: destination,
+                                                     dryRun: false,
+                                                     versionsFolder: versionsFolder,
+                                                     skipBuildJunk: skipJunk,
+                                                     patterns: patterns),
+                             onLine: { line in
+                                 guard let parsed = BackupService.parseTransferLine(line),
+                                       parsed.isFile else { return }
+                                 DispatchQueue.main.async {
+                                     self.currentFile = name + "/" + parsed.path
+                                     self.copiedFiles += 1
+                                     self.copiedBytes += parsed.bytes
+                                     if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
+                                         self.sourceStates[index].copiedFiles += 1
+                                         self.sourceStates[index].copiedBytes += parsed.bytes
+                                     }
+                                 }
+                             },
+                             completion: { status, errorText in
+                                 DispatchQueue.main.async {
+                                     if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
+                                         self.sourceStates[index].status = status == 0 ? .done : .failed
+                                     }
+                                     if status == 0 {
+                                         self.log.append("  \(name) done")
+                                     } else {
+                                         ok = false
+                                         let message = errorText.nonEmptyLines.first
+                                             ?? "rsync exited \(status)"
+                                         self.log.append("  ⚠︎ \(name): \(message)")
+                                     }
+                                 }
+                                 finished.signal()
+                             })
+
+                finished.wait()
             }
 
-            // The tag sidecar matters because NTFS and exFAT drop extended
-            // attributes; without this the backup would silently lose tags.
             let tagCount = self.writeTagSidecar(volume: volume, sources: sourceList)
 
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.lastRun = Date()
+                self.currentFile = nil
                 self.log.append("Saved tags for \(tagCount) files to tags.json")
-                self.summary = ok ? "Backup finished." : "Backup finished with errors — see the log."
+                self.summary = ok
+                    ? "Backed up \(self.copiedFiles) files — \(Fmt.bytes(self.copiedBytes))."
+                    : "Finished with errors — see the log."
                 completion(ok)
             }
         }
@@ -229,11 +359,12 @@ final class BackupService: ObservableObject {
                                   destination: String,
                                   dryRun: Bool,
                                   versionsFolder: String?,
-                                  skipBuildJunk: Bool = true) -> [String] {
-        var args = ["-rlt", "--itemize-changes"]
+                                  skipBuildJunk: Bool = true,
+                                  patterns: [String]? = nil) -> [String] {
+        var args = ["-rlt", "--out-format=%i|%l|%n"]
         if dryRun { args.append("--dry-run") }
         if skipBuildJunk {
-            for pattern in buildJunk { args.append("--exclude=\(pattern)") }
+            for pattern in patterns ?? buildJunk { args.append("--exclude=\(pattern)") }
         }
         if let versionsFolder = versionsFolder {
             args.append("--backup")
@@ -245,52 +376,66 @@ final class BackupService: ObservableObject {
         return args
     }
 
-    /// rsync's itemized output, e.g. ">f....... notes.txt" or "cd+++++++ dir/".
+    /// One line of `--out-format=%i|%l|%n`: change flags, byte length, path.
     ///
-    /// The flag block is not a fixed width — openrsync (shipped with macOS)
-    /// writes 9 characters where GNU rsync writes 11 — so the path is taken as
-    /// everything after the first space rather than from a fixed offset.
-    /// Slicing at a hard-coded index silently chopped the first characters off
-    /// every filename.
-    ///
-    /// Only the first `displayLimit` entries are kept. A real folder can
-    /// produce hundreds of thousands of lines, and holding a struct for each
-    /// would exhaust memory for a list nobody can read anyway; the counts are
-    /// still totalled over everything.
-    static func parseItemized(_ output: String,
-                              prefix: String,
-                              displayLimit: Int = 1500) -> (changes: [BackupChange],
-                                                            newCount: Int,
-                                                            updatedCount: Int) {
+    /// Parsed on the first two pipes only, since a filename may itself contain
+    /// one. Only the first `displayLimit` entries are kept — a real folder can
+    /// produce hundreds of thousands of lines and holding a struct per line
+    /// would exhaust memory for a list nobody can read — while counts and byte
+    /// totals are accumulated over every line.
+    static func parseTransfers(_ output: String,
+                               prefix: String,
+                               displayLimit: Int = 1500) -> (changes: [BackupChange],
+                                                             newCount: Int,
+                                                             updatedCount: Int,
+                                                             bytes: Int64) {
         var changes: [BackupChange] = []
         var newCount = 0
         var updatedCount = 0
+        var bytes: Int64 = 0
 
         output.enumerateLines { line, _ in
-            guard let space = line.firstIndex(of: " ") else { return }
-            let flags = String(line[line.startIndex ..< space])
-            let path = String(line[line.index(after: space)...])
+            guard let first = line.firstIndex(of: "|") else { return }
+            let flags = String(line[line.startIndex ..< first])
+            let rest = line[line.index(after: first)...]
+            guard let second = rest.firstIndex(of: "|") else { return }
+
+            let length = Int64(rest[rest.startIndex ..< second]) ?? 0
+            let path = String(rest[rest.index(after: second)...])
 
             if flags.count < 2 || path.isEmpty || path == "./" { return }
-
-            let isDirectory = Array(flags)[1] == "d"
-            let action: BackupChange.Action
-            if isDirectory {
-                action = .directory
-            } else if flags.contains("+") {
-                action = .new
-                newCount += 1
-            } else {
-                action = .updated
-                updatedCount += 1
+            if Array(flags)[1] == "d" {
+                if changes.count < displayLimit {
+                    changes.append(BackupChange(relativePath: prefix + "/" + path, action: .directory))
+                }
+                return
             }
+
+            let action: BackupChange.Action
+            if flags.contains("+") { action = .new; newCount += 1 }
+            else { action = .updated; updatedCount += 1 }
+            bytes += length
 
             if changes.count < displayLimit {
                 changes.append(BackupChange(relativePath: prefix + "/" + path, action: action))
             }
         }
 
-        return (changes, newCount, updatedCount)
+        return (changes, newCount, updatedCount, bytes)
+    }
+
+    /// Same line format, for a single line arriving during a live run.
+    static func parseTransferLine(_ line: String) -> (isFile: Bool, bytes: Int64, path: String)? {
+        guard let first = line.firstIndex(of: "|") else { return nil }
+        let flags = String(line[line.startIndex ..< first])
+        let rest = line[line.index(after: first)...]
+        guard let second = rest.firstIndex(of: "|") else { return nil }
+
+        let length = Int64(rest[rest.startIndex ..< second]) ?? 0
+        let path = String(rest[rest.index(after: second)...])
+        if flags.count < 2 || path.isEmpty || path == "./" { return nil }
+
+        return (Array(flags)[1] != "d", length, path)
     }
 
     private static func timestamp() -> String {
