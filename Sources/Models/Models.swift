@@ -309,3 +309,208 @@ struct RecentFile: Identifiable {
         return dir
     }
 }
+
+// MARK: - Organize
+
+/// What kind of thing a file is, for grouping purposes.
+enum FileKind: String, CaseIterable {
+    case documents = "Documents"
+    case spreadsheets = "Spreadsheets"
+    case presentations = "Presentations"
+    case images = "Images"
+    case video = "Video"
+    case audio = "Audio"
+    case archives = "Archives"
+    case installers = "Installers"
+    case code = "Code"
+    case data = "Data"
+    case other = "Other"
+
+    var icon: String {
+        switch self {
+        case .documents: return "doc.text"
+        case .spreadsheets: return "tablecells"
+        case .presentations: return "rectangle.on.rectangle"
+        case .images: return "photo"
+        case .video: return "film"
+        case .audio: return "waveform"
+        case .archives: return "archivebox"
+        case .installers: return "shippingbox"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .data: return "cylinder"
+        case .other: return "doc"
+        }
+    }
+
+    static func of(extension ext: String) -> FileKind {
+        switch ext.lowercased() {
+        case "pdf", "doc", "docx", "pages", "txt", "rtf", "md", "odt", "epub":
+            return .documents
+        case "xls", "xlsx", "numbers", "csv", "tsv", "ods":
+            return .spreadsheets
+        case "ppt", "pptx", "key", "odp":
+            return .presentations
+        case "jpg", "jpeg", "png", "gif", "heic", "tiff", "tif", "bmp", "webp", "svg", "raw", "cr2", "nef":
+            return .images
+        case "mp4", "mov", "avi", "mkv", "m4v", "wmv", "flv", "webm", "mpg", "mpeg":
+            return .video
+        case "mp3", "wav", "aac", "flac", "m4a", "aiff", "ogg", "wma":
+            return .audio
+        case "zip", "tar", "gz", "bz2", "7z", "rar", "xz", "tgz":
+            return .archives
+        case "dmg", "pkg", "app", "iso", "exe", "msi", "deb", "rpm":
+            return .installers
+        case "swift", "py", "js", "ts", "tsx", "jsx", "java", "c", "h", "cpp", "go", "rs",
+             "rb", "php", "sh", "html", "css", "sql", "ipynb":
+            return .code
+        case "json", "xml", "yaml", "yml", "plist", "db", "sqlite", "log":
+            return .data
+        default:
+            return .other
+        }
+    }
+}
+
+/// One proposed file move. Nothing is applied until the user confirms.
+struct OrganizeMove: Identifiable {
+    var id: String { return sourcePath }
+
+    let sourcePath: String
+    let destinationPath: String
+    let kind: FileKind
+    let sizeBytes: Int64
+    let modified: Date
+    var selected: Bool = true
+    /// Set when a file already exists at the destination.
+    var conflict: Bool = false
+
+    var name: String { return (sourcePath as NSString).lastPathComponent }
+
+    var destinationFolder: String {
+        return (destinationPath as NSString).deletingLastPathComponent
+    }
+
+    var relativeDestination: String {
+        return (destinationFolder as NSString).lastPathComponent
+    }
+}
+
+/// How files should be grouped into folders.
+enum OrganizeScheme: String, CaseIterable, Identifiable {
+    case byKind = "By type"
+    case byKindAndYear = "Type, then year"
+    case byYearAndMonth = "Year, then month"
+
+    var id: String { return rawValue }
+
+    var explanation: String {
+        switch self {
+        case .byKind: return "Documents/, Images/, Video/ …"
+        case .byKindAndYear: return "Documents/2026/, Images/2025/ …"
+        case .byYearAndMonth: return "2026/09-September/, 2026/08-August/ …"
+        }
+    }
+}
+
+/// A record of applied moves, so an organize run can be undone.
+struct UndoRecord: Codable {
+    let time: Date
+    /// destination -> original location
+    let moves: [String: String]
+}
+
+// MARK: - Backup
+
+/// A mounted volume the app could back up to.
+struct BackupVolume: Identifiable {
+    var id: String { return path }
+
+    let name: String
+    let path: String
+    let totalBytes: Int64
+    let freeBytes: Int64
+    let isRemovable: Bool
+    let fileSystem: String
+
+    /// NTFS and exFAT cannot store macOS permissions or extended attributes,
+    /// which is why tags need to travel in a sidecar index instead.
+    var preservesMetadata: Bool {
+        let fs = fileSystem.lowercased()
+        return fs.contains("apfs") || fs.contains("hfs")
+    }
+
+    var usedFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return Double(totalBytes - freeBytes) / Double(totalBytes)
+    }
+}
+
+/// One line of an rsync dry run.
+struct BackupChange: Identifiable {
+    var id: String { return relativePath }
+
+    let relativePath: String
+    let action: Action
+
+    enum Action {
+        case new        // not on the destination at all
+        case updated    // exists but differs
+        case directory
+
+        var label: String {
+            switch self {
+            case .new: return "New"
+            case .updated: return "Changed"
+            case .directory: return "Folder"
+            }
+        }
+    }
+
+    var name: String { return (relativePath as NSString).lastPathComponent }
+}
+
+// MARK: - Search
+
+/// A file in the search index.
+struct IndexedFile: Identifiable, Codable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let ext: String
+    let sizeBytes: Int64
+    let modified: Date
+    var tags: [String]
+
+    var kind: FileKind { return FileKind.of(extension: ext) }
+
+    var folder: String { return (path as NSString).deletingLastPathComponent }
+
+    var displayFolder: String {
+        let home = NSHomeDirectory()
+        let dir = folder
+        if dir.hasPrefix(home) { return "~" + dir.dropFirst(home.count) }
+        return dir
+    }
+
+    /// The sentence the embedding is built from. Folder names carry a lot of
+    /// meaning ("Invoices", "Tax 2025"), so they are part of it.
+    var searchableText: String {
+        let readableName = name
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: ".", with: " ")
+        let folderWords = folder.components(separatedBy: "/").suffix(3).joined(separator: " ")
+        let tagWords = tags.joined(separator: " ")
+        return "\(readableName) \(kind.rawValue) \(folderWords) \(tagWords)"
+    }
+}
+
+/// A ranked search hit.
+struct SearchHit: Identifiable {
+    var id: String { return file.path }
+
+    let file: IndexedFile
+    let score: Double
+    let matchedOnName: Bool
+}

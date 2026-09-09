@@ -9,6 +9,9 @@ enum Section: String, CaseIterable, Identifiable {
     case explore = "Explore"
     case growth = "Growth"
     case ports = "Ports"
+    case find = "Find"
+    case organize = "Organize"
+    case backup = "Backup"
 
     var id: String { return rawValue }
 
@@ -21,6 +24,17 @@ enum Section: String, CaseIterable, Identifiable {
         case .explore: return "eye.slash"
         case .growth: return "chart.line.uptrend.xyaxis"
         case .ports: return "network"
+        case .find: return "sparkle.magnifyingglass"
+        case .organize: return "folder.badge.gearshape"
+        case .backup: return "externaldrive.badge.timemachine"
+        }
+    }
+
+    /// Which sidebar group this belongs to.
+    var group: String {
+        switch self {
+        case .find, .organize, .backup: return "Files"
+        default: return "System"
         }
     }
 
@@ -32,6 +46,9 @@ enum Section: String, CaseIterable, Identifiable {
         case .storage: return "Where your disk space went, and what is safe to reclaim."
         case .explore: return "Drill into any folder — including the hidden ones Finder will not show you."
         case .growth: return "What grew, what shrank, and which files changed recently."
+        case .find: return "Search your files by meaning as well as by name, and tag them."
+        case .organize: return "Sort a messy folder into a structure — previewed first, undoable after."
+        case .backup: return "Mirror your folders to an external drive, keeping old versions."
         case .ports: return "Which programs are listening for network connections."
         }
     }
@@ -44,6 +61,9 @@ final class AppState: ObservableObject {
     let memory = MemoryMonitor()
     let storage = StorageScanner()
     let ports = PortScanner()
+    let organizer = Organizer()
+    let search = SearchIndex()
+    let backup = BackupService()
 
     @Published var section: Section = .dashboard
 
@@ -59,6 +79,9 @@ final class AppState: ObservableObject {
             memory.objectWillChange,
             storage.objectWillChange,
             ports.objectWillChange,
+            organizer.objectWillChange,
+            search.objectWillChange,
+            backup.objectWillChange,
         ]
         for source in sources {
             source
@@ -75,6 +98,8 @@ final class AppState: ObservableObject {
         storage.refresh()
         memory.start()
         ports.start()
+        backup.refreshVolumes()
+        search.loadIfNeeded()
     }
 
     func refreshAll() {
@@ -131,6 +156,9 @@ struct RootView: View {
         case .explore: ExploreView()
         case .growth: GrowthView()
         case .ports: PortsView()
+        case .find: FindView()
+        case .organize: OrganizeView()
+        case .backup: BackupView()
         }
     }
 }
@@ -155,9 +183,21 @@ struct SidebarView: View {
             .padding(.top, 18)
             .padding(.bottom, 16)
 
-            ForEach(Section.allCases) { item in
-                SidebarRow(section: item, selected: state.section == item) {
-                    state.section = item
+            ForEach(["System", "Files"], id: \.self) { group in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(group.uppercased())
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(p.textMuted)
+                        .tracking(0.6)
+                        .padding(.horizontal, 18)
+                        .padding(.top, group == "Files" ? 14 : 0)
+                        .padding(.bottom, 4)
+
+                    ForEach(Section.allCases.filter { $0.group == group }) { item in
+                        SidebarRow(section: item, selected: self.state.section == item) {
+                            self.state.section = item
+                        }
+                    }
                 }
             }
 

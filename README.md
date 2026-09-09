@@ -23,7 +23,7 @@ cp -R "build/Mac Manager.app" /Applications/
 
 Requires the Xcode Command Line Tools (`xcode-select --install`). Nothing else.
 
-## The six tabs
+## System tabs
 
 **Overview** *(above)* — memory, storage, app count and open ports at a glance,
 plus large apps you have not opened in over six months.
@@ -78,6 +78,56 @@ Every TCP port in the LISTEN state, which process owns it, and whether it is
 reachable from your network or only from this Mac.
 
 ![Ports](docs/screenshots/ports.png)
+
+## File tabs
+
+### Find
+
+Search your files by meaning as well as by name, and tag them.
+
+Scoring is hybrid on purpose. Meaning alone is not trustworthy on short
+filenames — asked for "work slides" a pure embedding search ranked a holiday
+photo above an actual presentation — so keyword matching against names, folders,
+tags and file kind carries most of the weight, and semantic similarity fills the
+gaps a keyword misses. Asking for "spreadsheet budget" surfaces a `.csv` with
+neither word in its name.
+
+The embedding model is Apple's, running on this Mac. Nothing is uploaded.
+
+Tags are real macOS Finder tags, written to the `_kMDItemUserTags` extended
+attribute — so tags set here appear in Finder's sidebar, and tags set in Finder
+appear here.
+
+### Organize
+
+Sorts loose files in a folder into a structure — by type, by type and year, or
+by year and month.
+
+Nothing moves until you have seen the complete plan and approved it. Existing
+subfolders are left alone, because they usually reflect a structure you already
+chose. Nothing is ever overwritten: a name that is already taken gets a numbered
+suffix. Every run records where each file came from, so **Undo** puts them all
+back and removes the folders it created.
+
+### Backup
+
+Mirrors chosen folders to an external drive using rsync.
+
+- **Never deletes.** `--delete` is not used, so removing a file on your Mac never
+  removes it from the backup.
+- **Always previewable.** A dry run lists exactly what would be copied first.
+- **Versioned.** Replaced files move into a timestamped folder rather than being
+  overwritten, so previous versions stay recoverable.
+- **Skips build junk.** On the machine this was built on, excluding
+  `node_modules` and friends took one folder from **679,767 files to 60,752**,
+  and the scan from 44 seconds to 3.
+- **Carries tags.** NTFS and exFAT drives cannot store extended attributes, so
+  tags would be silently lost on copy. They are written alongside the backup as
+  `tags.json` instead.
+
+It is a mirror with history, not a Time Machine replacement — it does not
+snapshot your whole system, and a drive that lives next to your Mac is not
+protection against fire or theft.
 
 ## How removal works
 
