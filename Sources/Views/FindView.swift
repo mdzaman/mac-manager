@@ -20,6 +20,15 @@ struct FindView: View {
                     trailing: {
             HStack(spacing: 10) {
                 SearchField(placeholder: "e.g. tax paperwork, holiday photos", text: $query)
+                Picker("", selection: Binding(get: { self.state.search.maxFiles },
+                                              set: { self.state.search.maxFiles = $0 })) {
+                    ForEach(SearchIndex.limitChoices, id: \.value) { choice in
+                        Text(choice.label).tag(choice.value)
+                    }
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .frame(width: 190)
+                .help("How many files to index")
                 Button(action: { self.state.search.rebuild() }) {
                     Text(state.search.isIndexing ? "Indexing…" : "Rebuild index")
                 }
@@ -76,12 +85,16 @@ struct FindView: View {
         Card {
             HStack(alignment: .top, spacing: 0) {
                 StatTile(label: "Files indexed", value: "\(state.search.indexedCount)",
-                         detail: state.search.isIndexing ? "scanning…" : indexAge)
+                         detail: state.search.isIndexing
+                            ? "scanning…"
+                            : (state.search.indexedCount >= state.search.maxFiles
+                                ? "at the limit — raise it above" : indexAge))
                 Divider().frame(height: 40)
                 StatTile(label: "Understood by meaning",
-                         value: state.search.isEmbedding
-                            ? "\(state.search.embeddedCount)" : "\(state.search.embeddedCount)",
-                         detail: state.search.isEmbedding ? "building…" : "ready for semantic search")
+                         value: "\(state.search.embeddedCount)",
+                         detail: state.search.isEmbedding
+                            ? "building across all cores…"
+                            : "using \(Fmt.bytes(state.search.embeddingMemoryBytes)) of memory")
                 Divider().frame(height: 40)
                 StatTile(label: "Tags in use", value: "\(state.search.allTags.count)",
                          detail: state.search.allTags.isEmpty ? "none yet" : "across your files")

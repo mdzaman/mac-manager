@@ -94,6 +94,13 @@ neither word in its name.
 
 The embedding model is Apple's, running on this Mac. Nothing is uploaded.
 
+Vectors are quantized to Int8 — 512 bytes per file rather than 4 KB. Measured
+against full precision the worst cosine error is 0.006, far too small to change
+a ranking, and it takes a 43,000-file index from ~170 MB of memory to 22 MB.
+Embedding runs across all cores at roughly 1,600 files/sec, so that index builds
+in about 40 seconds. The default limit is 250,000 files and is adjustable in the
+tab; search works lexically while embedding is still running.
+
 Tags are real macOS Finder tags, written to the `_kMDItemUserTags` extended
 attribute — so tags set here appear in Finder's sidebar, and tags set in Finder
 appear here.
