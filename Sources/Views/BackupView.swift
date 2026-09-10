@@ -27,6 +27,7 @@ struct BackupView: View {
             }
         }) {
             actionSection(p: p, backup: backup)
+            permissionSection(p: p, backup: backup)
             interruptionSection(p: p, backup: backup)
             drives(p: p, backup: backup)
             sources(p: p, backup: backup)
@@ -55,6 +56,38 @@ struct BackupView: View {
             ? " Files being replaced are moved into a dated versions folder first, so the previous copy is kept."
             : " Replaced files are overwritten, with no previous version kept."
         return "\(files) files will be copied.\(versions) Nothing on the drive is ever deleted."
+    }
+
+    /// Folders macOS blocked. Without this the backup looks complete while
+    /// quietly leaving out a photo library or a mail store.
+    @ViewBuilder
+    private func permissionSection(p: Palette, backup: BackupService) -> some View {
+        if !backup.unreadablePaths.isEmpty {
+            Card {
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: "lock.trianglebadge.exclamationmark.fill")
+                        .font(.system(size: 16)).foregroundColor(p.critical)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(backup.unreadablePaths.count) folder\(backup.unreadablePaths.count == 1 ? "" : "s") could not be read")
+                            .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                        Text("macOS is blocking access, so these are missing from the backup. Grant Full Disk Access in System Settings › Privacy & Security › Full Disk Access, add Mac Manager, then preview again.")
+                            .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(backup.unreadablePaths.prefix(4), id: \.self) { path in
+                            Text(path)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(p.textMuted)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                    Spacer()
+                    Button("Open Settings") {
+                        Shell.run("/usr/bin/open",
+                                  ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"])
+                    }
+                }
+            }
+        }
     }
 
     /// The one control that matters, carrying its own status.
@@ -247,37 +280,65 @@ struct BackupView: View {
         }
     }
 
+    /// Folder selection.
+    ///
+    /// A full-width row per folder rather than a row of small chips: the chips
+    /// were easy to miss and gave no indication of how big each folder was or
+    /// how much of it was already on the drive.
     private func sources(p: Palette, backup: BackupService) -> some View {
-        let home = NSHomeDirectory()
-        let options = ["Documents", "Desktop", "Pictures", "Movies", "Music", "Downloads"]
-            .map { home + "/" + $0 }
-            .filter { FileManager.default.fileExists(atPath: $0) }
-
-        return Card {
-            Text("What to back up")
-                .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
-            HStack(spacing: 7) {
-                ForEach(options, id: \.self) { path in
-                    let active = backup.sources.contains(path)
-                    Button(action: {
-                        if active { backup.sources.removeAll { $0 == path } }
-                        else { backup.sources.append(path) }
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: active ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 10))
-                            Text((path as NSString).lastPathComponent)
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundColor(active ? .white : p.series1)
-                        .padding(.horizontal, 9).padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 5)
-                                        .fill(active ? p.series1 : p.series1.opacity(0.12)))
-                    }
-                    .buttonStyle(PlainButtonStyle())
+        Card(padding: 0, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("What to back up")
+                        .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                    Text("\(backup.sources.count) of \(backup.availableSources.count) folders selected")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
                 }
                 Spacer()
+                Button("Select all") { backup.selectAllSources() }
+                Button("None") { backup.clearSources() }
+                Button("Add folder…") { self.chooseFolder(backup: backup) }
             }
+            .padding(.horizontal, 14).padding(.top, 13).padding(.bottom, 10)
+
+            Divider()
+
+            ForEach(Array(backup.availableSources.enumerated()), id: \.element) { index, path in
+                SourceRow(path: path,
+                          selected: backup.isSelected(path),
+                          state: backup.sourceStates.first { $0.sourcePath == path },
+                          isCustom: backup.customSources.contains(path),
+                          striped: index % 2 == 1,
+                          onToggle: { backup.toggleSource(path) },
+                          onRemove: { backup.removeCustomSource(path) },
+                          onReveal: { StorageScanner.reveal(path) })
+
+                if index < backup.availableSources.count - 1 { Divider().padding(.leading, 14) }
+            }
+
+            if backup.isMeasuringSources {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.4).frame(width: 14, height: 14)
+                    Text("Measuring folder sizes…")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+            }
+        }
+    }
+
+    /// Adds any folder on the Mac, not only the standard home folders.
+    private func chooseFolder(backup: BackupService) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add to backup"
+        panel.message = "Choose folders to include in the backup"
+
+        if panel.runModal() == .OK {
+            for url in panel.urls { backup.addCustomSource(url.path) }
         }
     }
 
@@ -675,6 +736,153 @@ struct BackupView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+}
+
+/// One selectable folder, with its size on both sides and its own progress.
+struct SourceRow: View {
+    @Environment(\.colorScheme) private var scheme
+
+    let path: String
+    let selected: Bool
+    let state: BackupSourceState?
+    let isCustom: Bool
+    let striped: Bool
+    let onToggle: () -> Void
+    let onRemove: () -> Void
+    let onReveal: () -> Void
+
+    private var exists: Bool { return FileManager.default.fileExists(atPath: path) }
+
+    var body: some View {
+        let p = Palette(scheme)
+        let name = (path as NSString).lastPathComponent
+
+        return HStack(spacing: 11) {
+            // The whole left side toggles, not just a small checkbox.
+            Button(action: onToggle) {
+                HStack(spacing: 11) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 17))
+                        .foregroundColor(selected ? p.series1 : p.textMuted)
+
+                    Image(systemName: SourceRow.icon(for: name))
+                        .font(.system(size: 14))
+                        .foregroundColor(selected ? p.series1 : p.textMuted)
+                        .frame(width: 20)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(name)
+                                .font(.system(size: 13, weight: selected ? .medium : .regular))
+                                .foregroundColor(exists ? p.textPrimary : p.textMuted)
+                            if isCustom {
+                                Text("added").font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(p.series3)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(RoundedRectangle(cornerRadius: 3)
+                                                    .fill(p.series3.opacity(0.15)))
+                            }
+                            if !exists {
+                                Text("not found").font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(p.serious)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(RoundedRectangle(cornerRadius: 3)
+                                                    .fill(p.serious.opacity(0.15)))
+                            }
+                        }
+                        Text(detailLine(p: p))
+                            .font(.system(size: 10))
+                            .foregroundColor(p.textMuted)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Progress is shown for every selected folder, before and during a
+            // run, so the list itself reports the work.
+            VStack(alignment: .trailing, spacing: 3) {
+                ShimmerBar(fraction: state?.progress ?? 0,
+                           height: 6,
+                           animated: state?.status == .running)
+                    .frame(width: 130)
+                Text(statusText)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(statusColor(p: p))
+            }
+            .opacity(selected ? 1 : 0.35)
+
+            Button(action: isCustom ? onRemove : onReveal) {
+                Image(systemName: isCustom ? "minus.circle" : "folder")
+                    .font(.system(size: 11))
+                    .foregroundColor(isCustom ? p.critical : p.textMuted)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .help(isCustom ? "Remove this folder" : "Show in Finder")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(striped ? p.track.opacity(0.28) : Color.clear)
+    }
+
+    private func detailLine(p: Palette) -> String {
+        guard exists else { return "This folder no longer exists on this Mac" }
+        guard let state = state else { return selected ? "Waiting to be measured" : "Not selected" }
+
+        var parts: [String] = []
+        if let files = state.sourceFiles, let bytes = state.sourceBytes {
+            parts.append("\(files) files · \(Fmt.bytes(bytes))")
+        } else {
+            parts.append("measuring…")
+        }
+        if let targetFiles = state.targetFiles {
+            parts.append(targetFiles == 0 ? "not on the drive yet"
+                                          : "\(targetFiles) already on the drive")
+        }
+        if state.pendingFiles > 0 {
+            parts.append("\(state.pendingFiles) to copy · \(Fmt.bytes(state.pendingBytes))")
+        }
+        if state.excludedFiles > 0 {
+            parts.append("\(state.excludedFiles) skipped by rules")
+        }
+        return parts.joined(separator: "  ·  ")
+    }
+
+    private var statusText: String {
+        guard selected else { return "Skipped" }
+        guard let state = state else { return "Ready" }
+        switch state.status {
+        case .running: return "\(Fmt.percent(state.progress)) · \(state.copiedFiles) files"
+        case .done: return state.pendingFiles == 0 ? "Up to date" : "Finished"
+        case .failed: return "Failed"
+        case .measuring: return "Measuring"
+        default: return state.pendingFiles > 0 ? "\(state.pendingFiles) to copy" : "Ready"
+        }
+    }
+
+    private func statusColor(p: Palette) -> Color {
+        guard selected, let state = state else { return p.textMuted }
+        switch state.status {
+        case .running: return p.series1
+        case .done: return p.good
+        case .failed: return p.critical
+        default: return p.textSecondary
+        }
+    }
+
+    static func icon(for name: String) -> String {
+        switch name {
+        case "Documents": return "doc.text.fill"
+        case "Desktop": return "menubar.dock.rectangle"
+        case "Downloads": return "arrow.down.circle.fill"
+        case "Pictures": return "photo.fill"
+        case "Movies": return "film.fill"
+        case "Music": return "music.note"
+        default: return "folder.fill"
         }
     }
 }

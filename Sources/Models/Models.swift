@@ -589,6 +589,8 @@ struct BackupSourceState: Identifiable {
     /// What is already on the drive.
     var targetFiles: Int?
     var targetBytes: Int64?
+    /// Files the exclusion rules keep out of this folder.
+    var excludedFiles: Int = 0
     /// What a run would copy.
     var pendingFiles: Int = 0
     var pendingBytes: Int64 = 0

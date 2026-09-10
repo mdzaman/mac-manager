@@ -27,20 +27,47 @@ final class ExclusionRules: ObservableObject {
 
     static let fileName = "exclusions.json"
 
+    /// Raised whenever the recommended set changes meaning. A stored file from
+    /// an older version is rebuilt rather than trusted: silently keeping a rule
+    /// switched on after it was changed to default-off would go on excluding
+    /// files the user never agreed to exclude.
+    static let currentVersion = 2
+
+    struct Stored: Codable {
+        var version: Int
+        var rules: [ExclusionRule]
+    }
+
     private(set) var loadProblem: String?
+    /// Set when stored rules were rebuilt, so the UI can say why.
+    private(set) var wasReset = false
 
     init() {
-        let result = StateStore.load([ExclusionRule].self, from: ExclusionRules.fileName)
+        let result = StateStore.load(Stored.self, from: ExclusionRules.fileName)
         loadProblem = result.problem
-        if let saved = result.value, !saved.isEmpty {
-            rules = saved
+
+        if let saved = result.value, saved.version == ExclusionRules.currentVersion,
+           !saved.rules.isEmpty {
+            rules = saved.rules
         } else {
             rules = ExclusionRules.recommended
+            wasReset = (result.value != nil)
         }
     }
 
     private func save() {
-        StateStore.save(rules, as: ExclusionRules.fileName)
+        StateStore.save(Stored(version: ExclusionRules.currentVersion, rules: rules),
+                        as: ExclusionRules.fileName)
+    }
+
+    /// Patterns that hide whole folders, as opposed to single files by
+    /// extension. Needed to count what a scan would skip.
+    var activeFolderPatterns: [String] {
+        return activePatterns.filter { !$0.hasPrefix("*.") && !$0.contains("/") }
+    }
+
+    var activeExtensionPatterns: [String] {
+        return activePatterns.filter { $0.hasPrefix("*.") }.map { String($0.dropFirst(2)) }
     }
 
     // MARK: - Recommendations

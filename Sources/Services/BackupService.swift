@@ -72,7 +72,20 @@ final class BackupService: ObservableObject {
         return Double(totalPendingBytes - copiedBytes) / rate
     }
 
-    @Published var sources: [String] = BackupService.defaultSources
+    @Published private(set) var sources: [String] = BackupService.defaultSources
+    /// Folders the user added beyond the standard set.
+    @Published private(set) var customSources: [String] = []
+    @Published private(set) var isMeasuringSources = false
+    /// Folders macOS would not let rsync read — almost always a Full Disk
+    /// Access problem, which otherwise fails silently.
+    @Published private(set) var unreadablePaths: [String] = []
+
+    static let selectionFileName = "backup-selection.json"
+
+    struct Selection: Codable {
+        var selected: [String]
+        var custom: [String]
+    }
     @Published var destinationVolume: String?
     @Published var keepVersions: Bool = true
     @Published var skipBuildFolders: Bool = true
@@ -101,6 +114,141 @@ final class BackupService: ObservableObject {
     /// things.
     static let backupFolderName = "MacManager Backup"
 
+    // MARK: - Choosing folders
+
+    /// Every folder offered, standard ones first.
+    ///
+    /// Folders that do not exist are still listed rather than silently dropped:
+    /// a missing folder the user expected to see is more confusing than one
+    /// shown as unavailable.
+    var availableSources: [String] {
+        let home = NSHomeDirectory()
+        let standard = ["Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music"]
+            .map { home + "/" + $0 }
+        return standard + customSources.filter { !standard.contains($0) }
+    }
+
+    func isSelected(_ path: String) -> Bool { return sources.contains(path) }
+
+    func toggleSource(_ path: String) {
+        if sources.contains(path) {
+            sources.removeAll { $0 == path }
+        } else {
+            sources.append(path)
+        }
+        afterSelectionChange()
+    }
+
+    func selectAllSources() {
+        sources = availableSources.filter { FileManager.default.fileExists(atPath: $0) }
+        afterSelectionChange()
+    }
+
+    func clearSources() {
+        sources = []
+        afterSelectionChange()
+    }
+
+    func addCustomSource(_ path: String) {
+        if customSources.contains(path) || path.isEmpty { return }
+        customSources.append(path)
+        if !sources.contains(path) { sources.append(path) }
+        afterSelectionChange()
+    }
+
+    func removeCustomSource(_ path: String) {
+        customSources.removeAll { $0 == path }
+        sources.removeAll { $0 == path }
+        afterSelectionChange()
+    }
+
+    /// Rebuilds the display rows and saves the choice.
+    ///
+    /// Without this the rows shown during a run could describe a different set
+    /// of folders from the one actually being copied, because they were only
+    /// ever built during a preview.
+    private func afterSelectionChange() {
+        syncSourceStates()
+        StateStore.save(Selection(selected: sources, custom: customSources),
+                        as: BackupService.selectionFileName)
+        // A previous preview no longer describes this selection.
+        changes = []
+        pendingNew = 0
+        pendingUpdated = 0
+        totalPendingBytes = 0
+        summary = nil
+        measureSources()
+    }
+
+    private func syncSourceStates() {
+        var rebuilt: [BackupSourceState] = []
+        for path in sources {
+            if var existing = sourceStates.first(where: { $0.sourcePath == path }) {
+                existing.status = existing.status == .running ? .running : existing.status
+                rebuilt.append(existing)
+            } else {
+                rebuilt.append(BackupSourceState(sourcePath: path,
+                                                 name: (path as NSString).lastPathComponent))
+            }
+        }
+        sourceStates = rebuilt
+    }
+
+    private func loadSelection() {
+        guard let saved = StateStore.load(Selection.self, from: BackupService.selectionFileName).value
+        else { syncSourceStates(); measureSources(); return }
+
+        customSources = saved.custom
+        let existing = saved.selected.filter { FileManager.default.fileExists(atPath: $0) }
+        if !existing.isEmpty { sources = existing }
+        syncSourceStates()
+        measureSources()
+    }
+
+    /// Fills in how big each chosen folder is, on this Mac and on the drive, so
+    /// the selection list is informative before any preview is run.
+    func measureSources() {
+        if isMeasuringSources { return }
+        let targets = sources
+        if targets.isEmpty { return }
+
+        isMeasuringSources = true
+        let volume = selectedVolume
+        let rules = exclusions
+
+        work.async {
+            for path in targets {
+                let files = BackupService.countFiles(in: path, excluding: rules)
+                let excluded = BackupService.excludedCount(in: path, rules: rules ?? ExclusionRules())
+                let bytes = AppScanner.size(of: path)
+
+                var targetFiles: Int?
+                var targetBytes: Int64?
+                if let volume = volume {
+                    let destination = BackupService.destinationRoot(volume: volume, source: path)
+                    if FileManager.default.fileExists(atPath: destination) {
+                        targetFiles = BackupService.countFiles(in: destination)
+                        targetBytes = AppScanner.size(of: destination)
+                    } else {
+                        targetFiles = 0
+                        targetBytes = 0
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    guard let index = self.sourceStates.firstIndex(where: { $0.sourcePath == path })
+                    else { return }
+                    self.sourceStates[index].sourceFiles = files
+                    self.sourceStates[index].sourceBytes = bytes
+                    self.sourceStates[index].excludedFiles = excluded
+                    self.sourceStates[index].targetFiles = targetFiles
+                    self.sourceStates[index].targetBytes = targetBytes
+                }
+            }
+            DispatchQueue.main.async { self.isMeasuringSources = false }
+        }
+    }
+
     // MARK: - Interruption handling
 
     /// Call once at startup. Recovers an interrupted job and starts listening
@@ -109,6 +257,7 @@ final class BackupService: ObservableObject {
     func begin() {
         history = StateStore.load(BackupHistory.self, from: BackupService.historyFileName).value
             ?? BackupHistory()
+        loadSelection()
         recoverInterruptedJob()
         installObservers()
     }
@@ -330,9 +479,11 @@ final class BackupService: ObservableObject {
 
         let sourceList = sources
         let patterns = exclusions?.activePatterns
+        let patternsRules = exclusions
 
         work.async {
             var all: [BackupChange] = []
+            var unreadable: [String] = []
             var totalNew = 0
             var totalUpdated = 0
             var totalBytes: Int64 = 0
@@ -346,6 +497,14 @@ final class BackupService: ObservableObject {
                                                                versionsFolder: nil,
                                                                skipBuildJunk: self.skipBuildFolders,
                                                                patterns: patterns))
+                // Folders macOS protects report here rather than failing loudly,
+                // so they are collected and surfaced instead of vanishing.
+                for line in result.err.nonEmptyLines where line.contains("unreadable") {
+                    if let range = line.range(of: ": ") {
+                        unreadable.append(String(line[range.upperBound...])
+                                            .replacingOccurrences(of: ": unreadable directory", with: ""))
+                    }
+                }
                 let parsed = BackupService.parseTransfers(result.out,
                                                           prefix: (source as NSString).lastPathComponent)
                 all.append(contentsOf: parsed.changes)
@@ -366,7 +525,7 @@ final class BackupService: ObservableObject {
                 let targetBytes = AppScanner.size(of: destination)
                 let targetFiles = BackupService.countFiles(in: destination)
                 let sourceBytes = AppScanner.size(of: source)
-                let sourceFiles = BackupService.countFiles(in: source)
+                let sourceFiles = BackupService.countFiles(in: source, excluding: patternsRules)
 
                 DispatchQueue.main.async {
                     if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
@@ -383,6 +542,7 @@ final class BackupService: ObservableObject {
                 self.pendingNew = totalNew
                 self.pendingUpdated = totalUpdated
                 self.totalPendingBytes = totalBytes
+                self.unreadablePaths = unreadable
                 self.isScanning = false
                 let total = totalNew + totalUpdated
                 self.summary = total == 0
@@ -392,10 +552,41 @@ final class BackupService: ObservableObject {
         }
     }
 
-    static func countFiles(in path: String) -> Int {
+    /// Counts files, applying the same exclusions rsync will.
+    ///
+    /// Counting everything and copying a subset was actively misleading: a
+    /// folder reported 607,704 files while only around 9,000 would ever be
+    /// copied, because the rest sat inside excluded build folders.
+    static func countFiles(in path: String, excluding rules: ExclusionRules? = nil) -> Int {
         if !FileManager.default.fileExists(atPath: path) { return 0 }
-        let result = Shell.sh("find \(BackupService.quote(path)) -type f 2>/dev/null | wc -l")
+
+        var command = "find \(quote(path))"
+
+        if let rules = rules {
+            let folders = rules.activeFolderPatterns
+            if !folders.isEmpty {
+                let clause = folders.map { "-name \(quote($0))" }.joined(separator: " -o ")
+                command += " \\( \(clause) \\) -prune -o"
+            }
+            command += " -type f"
+            for ext in rules.activeExtensionPatterns {
+                command += " ! -name \(quote("*." + ext))"
+            }
+            command += " -print"
+        } else {
+            command += " -type f -print"
+        }
+
+        let result = Shell.sh(command + " 2>/dev/null | wc -l")
         return Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// How many files the current rules are keeping out of a folder, so the
+    /// number is visible rather than implied.
+    static func excludedCount(in path: String, rules: ExclusionRules) -> Int {
+        let all = countFiles(in: path)
+        let kept = countFiles(in: path, excluding: rules)
+        return max(0, all - kept)
     }
 
     private static func quote(_ path: String) -> String {
