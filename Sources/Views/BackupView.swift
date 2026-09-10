@@ -26,14 +26,14 @@ struct BackupView: View {
                 .disabled(backup.selectedVolume == nil || backup.isScanning || backup.isRunning)
             }
         }) {
+            actionSection(p: p, backup: backup)
             interruptionSection(p: p, backup: backup)
             drives(p: p, backup: backup)
             sources(p: p, backup: backup)
             options(p: p, backup: backup)
             summarySection(p: p, backup: backup)
             progressSection(p: p, backup: backup)
-            versionsCard(p: p, backup: backup)
-            stateHealthCard(p: p)
+            recordsSection(p: p, backup: backup)
             safetyNote(p: p, backup: backup)
         }
         .onAppear { if backup.volumes.isEmpty { backup.refreshVolumes() } }
@@ -55,6 +55,44 @@ struct BackupView: View {
             ? " Files being replaced are moved into a dated versions folder first, so the previous copy is kept."
             : " Replaced files are overwritten, with no previous version kept."
         return "\(files) files will be copied.\(versions) Nothing on the drive is ever deleted."
+    }
+
+    /// The one control that matters, carrying its own status.
+    @ViewBuilder
+    private func actionSection(p: Palette, backup: BackupService) -> some View {
+        VStack(spacing: 8) {
+            BackupButton(isRunning: backup.isRunning,
+                         progress: backup.progress,
+                         historyLabel: backup.history.summaryLabel,
+                         copiedFiles: backup.copiedFiles,
+                         totalFiles: backup.pendingNew + backup.pendingUpdated,
+                         enabled: backup.selectedVolume != nil && !backup.isScanning,
+                         action: {
+                             if backup.isRunning { return }
+                             if backup.changes.isEmpty && backup.summary == nil {
+                                 // Never run blind — preview first, then the
+                                 // button becomes the confirmed start.
+                                 backup.preview()
+                             } else {
+                                 self.confirmRun = true
+                             }
+                         })
+
+            if backup.isRunning, let file = backup.currentFile {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.on.doc.fill")
+                        .font(.system(size: 9)).foregroundColor(p.series1)
+                    Text(file)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(p.textSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Text(backup.estimatedRemaining.map { BackupView.duration($0) + " left" } ?? "")
+                        .font(.system(size: 10)).foregroundColor(p.textMuted)
+                }
+                .padding(.horizontal, 4)
+            }
+        }
     }
 
     @ViewBuilder
@@ -292,16 +330,9 @@ struct BackupView: View {
 
             // Progress is measured in bytes, not files: one file can be a
             // gigabyte and the next a kilobyte, so a file-count bar lies.
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 5).fill(p.track).frame(height: 10)
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(backup.isRunning ? p.series1 : p.good)
-                        .frame(width: max(4, geo.size.width * CGFloat(backup.progress)), height: 10)
-                }
-                .frame(height: geo.size.height, alignment: .center)
-            }
-            .frame(height: 14)
+            ShimmerBar(fraction: backup.isRunning ? backup.progress : 1,
+                       height: 10,
+                       animated: backup.isRunning)
 
             HStack(alignment: .top, spacing: 0) {
                 StatTile(label: "Files copied",
@@ -518,6 +549,53 @@ struct BackupView: View {
                             Image(systemName: "folder").font(.system(size: 10)).foregroundColor(p.textMuted)
                         }
                         .buttonStyle(PlainButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+
+    /// SwiftUI's view builder takes at most ten children, so the record-keeping
+    /// panels travel together.
+    @ViewBuilder
+    private func recordsSection(p: Palette, backup: BackupService) -> some View {
+        versionsCard(p: p, backup: backup)
+        historyCard(p: p, backup: backup)
+        stateHealthCard(p: p)
+    }
+
+    /// Previous runs, so "12 backups" on the button can be checked.
+    @ViewBuilder
+    private func historyCard(p: Palette, backup: BackupService) -> some View {
+        if !backup.history.runs.isEmpty {
+            Card {
+                HStack {
+                    Text("Backup history")
+                        .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                    Spacer()
+                    Text("\(backup.history.completedCount) completed · \(Fmt.bytes(backup.history.totalBytes)) copied in total")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                }
+
+                ForEach(backup.history.runs.reversed().prefix(8)) { run in
+                    HStack(spacing: 8) {
+                        Image(systemName: run.succeeded ? "checkmark.circle.fill"
+                                                        : "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(run.succeeded ? p.good : p.serious)
+                        Text(Fmt.date(run.finishedAt))
+                            .font(.system(size: 11)).foregroundColor(p.textPrimary)
+                            .frame(width: 110, alignment: .leading)
+                        Text(run.volumeName)
+                            .font(.system(size: 10)).foregroundColor(p.textMuted)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("\(run.files) files")
+                            .font(.system(size: 10)).foregroundColor(p.textSecondary)
+                        Text(Fmt.bytes(run.bytes))
+                            .font(.system(size: 11, design: .rounded))
+                            .foregroundColor(p.textPrimary)
+                            .frame(width: 76, alignment: .trailing)
                     }
                 }
             }

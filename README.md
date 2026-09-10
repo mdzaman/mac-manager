@@ -113,6 +113,17 @@ Mirrors chosen folders to an external drive using rsync.
   tags would be silently lost on copy. They are written alongside the backup as
   `tags.json` instead.
 
+The tab leads with one control that carries its own status. Before anything has
+run it reads **Backup**; while a run is in flight it reads **Backup in
+progress…** over a moving gradient with the live percentage and the file
+currently being copied; once runs have completed it reads **Backup (12 backups ·
+last 9 Sep at 21:40)**. The count and date are stored on disk, so they are still
+right after a relaunch, and a failed run does not inflate the count.
+
+The motion is deliberate rather than decoration: a static bar at 4% looks exactly
+like a frozen one, and a single large file can take minutes without the number
+moving. Continuous movement is what distinguishes working from hung.
+
 **Interruptions are expected, not exceptional.** A run is journalled to disk as
 it proceeds, so a backup cut short — the drive unplugged, the Mac asleep or shut
 down, the app quit — is picked up where it stopped rather than started over.

@@ -764,3 +764,42 @@ enum ChangeWindow: String, CaseIterable, Identifiable {
         return Date().addingTimeInterval(-Double(days) * 86_400)
     }
 }
+
+// MARK: - Backup history
+
+/// A record of one finished backup.
+struct BackupRunRecord: Codable, Identifiable {
+    var id: String { return "\(finishedAt.timeIntervalSince1970)" }
+
+    let finishedAt: Date
+    let files: Int
+    let bytes: Int64
+    let volumeName: String
+    let succeeded: Bool
+}
+
+/// How many backups have run and when — kept on disk so the count survives
+/// relaunches rather than resetting every time the app opens.
+struct BackupHistory: Codable {
+    var runs: [BackupRunRecord] = []
+
+    var completedCount: Int { return runs.filter { $0.succeeded }.count }
+    var lastCompleted: BackupRunRecord? { return runs.last { $0.succeeded } }
+    var totalFiles: Int { return runs.reduce(0) { $0 + $1.files } }
+    var totalBytes: Int64 { return runs.reduce(0) { $0 + $1.bytes } }
+
+    mutating func record(_ run: BackupRunRecord) {
+        runs.append(run)
+        // Keep the recent history readable rather than unbounded.
+        if runs.count > 50 { runs.removeFirst(runs.count - 50) }
+    }
+
+    /// "12 backups · last 9 Sep at 21:40"
+    var summaryLabel: String? {
+        guard completedCount > 0, let last = lastCompleted else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM 'at' HH:mm"
+        let plural = completedCount == 1 ? "backup" : "backups"
+        return "\(completedCount) \(plural) · last \(formatter.string(from: last.finishedAt))"
+    }
+}

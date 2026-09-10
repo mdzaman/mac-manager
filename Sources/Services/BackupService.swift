@@ -47,6 +47,11 @@ final class BackupService: ObservableObject {
     private var observersInstalled = false
 
     static let jobFileName = "backup-job.json"
+    static let historyFileName = "backup-history.json"
+
+    /// Completed runs, persisted — the count and last-run time are part of what
+    /// the user expects to still be there tomorrow.
+    @Published private(set) var history = BackupHistory()
 
     /// Overall fraction copied, by bytes — file counts mislead when one file is
     /// a gigabyte and the next is a kilobyte.
@@ -102,6 +107,8 @@ final class BackupService: ObservableObject {
     /// for the events that can break a backup: the drive going away, and the
     /// machine sleeping.
     func begin() {
+        history = StateStore.load(BackupHistory.self, from: BackupService.historyFileName).value
+            ?? BackupHistory()
         recoverInterruptedJob()
         installObservers()
     }
@@ -600,6 +607,13 @@ final class BackupService: ObservableObject {
                 self.currentFile = nil
                 self.resumable = nil
                 self.log.append("Saved tags for \(tagCount) files to tags.json")
+                self.history.record(BackupRunRecord(finishedAt: Date(),
+                                                    files: self.copiedFiles,
+                                                    bytes: self.copiedBytes,
+                                                    volumeName: current.volumeName,
+                                                    succeeded: ok))
+                StateStore.save(self.history, as: BackupService.historyFileName)
+
                 self.summary = ok
                     ? "Backed up \(self.copiedFiles) files — \(Fmt.bytes(self.copiedBytes))."
                     : "Finished with errors — see the log."
