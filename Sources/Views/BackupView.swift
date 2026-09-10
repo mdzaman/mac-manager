@@ -145,8 +145,16 @@ struct BackupView: View {
                     Image(systemName: backup.changes.isEmpty && !backup.isRunning
                             ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
                         .font(.system(size: 13)).foregroundColor(p.good)
-                    Text(summary).font(.system(size: 12, weight: .medium))
-                        .foregroundColor(p.textPrimary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(summary).font(.system(size: 12, weight: .medium))
+                            .foregroundColor(p.textPrimary)
+                        if let estimate = backup.estimatedDuration(
+                                files: backup.pendingNew + backup.pendingUpdated),
+                           !backup.isRunning, estimate > 5 {
+                            Text("Roughly \(BackupView.duration(estimate)) at this drive's measured speed")
+                                .font(.system(size: 10)).foregroundColor(p.textMuted)
+                        }
+                    }
                     Spacer()
                     if !backup.changes.isEmpty && !backup.isRunning {
                         Button(action: { self.confirmRun = true }) { Text("Back up now") }
@@ -269,7 +277,7 @@ struct BackupView: View {
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 11)).foregroundColor(p.serious)
-                        Text("\(volume.fileSystem) cannot store macOS permissions or tags. Your files copy fine, and tags are written alongside them as tags.json so nothing is lost — but the tags will not show in Finder on this drive.")
+                        Text("\(volume.fileSystem) cannot store macOS permissions or tags. Files copy fine and tags are written alongside them as tags.json, but they will not show in Finder on this drive. This format also carries a large per-file cost: measured here at about 190 small files a second against 128 MB/s for a single large file, so a backup of many small files is limited by the drive's format rather than by this Mac. Reformatting the drive as APFS would remove both problems, and would erase everything on it.")
                             .font(.system(size: 11)).foregroundColor(p.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

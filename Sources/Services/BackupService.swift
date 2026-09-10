@@ -79,6 +79,8 @@ final class BackupService: ObservableObject {
     /// Folders macOS would not let rsync read — almost always a Full Disk
     /// Access problem, which otherwise fails silently.
     @Published private(set) var unreadablePaths: [String] = []
+    /// Throughput measured during the last run, in files per second.
+    @Published private(set) var lastKnownRate: Double = 0
 
     static let selectionFileName = "backup-selection.json"
 
@@ -180,6 +182,7 @@ final class BackupService: ObservableObject {
         measureSources()
     }
 
+
     private func syncSourceStates() {
         var rebuilt: [BackupSourceState] = []
         for path in sources {
@@ -207,9 +210,18 @@ final class BackupService: ObservableObject {
 
     /// Fills in how big each chosen folder is, on this Mac and on the drive, so
     /// the selection list is informative before any preview is run.
-    func measureSources() {
+    /// Fills in how big each chosen folder is, on this Mac and on the drive.
+    ///
+    /// Only measures what is missing, so toggling a checkbox costs one folder's
+    /// walk rather than re-measuring everything that was already known.
+    func measureSources(force: Bool = false) {
         if isMeasuringSources { return }
-        let targets = sources
+
+        let targets = sources.filter { path in
+            if force { return true }
+            guard let state = sourceStates.first(where: { $0.sourcePath == path }) else { return true }
+            return state.sourceFiles == nil
+        }
         if targets.isEmpty { return }
 
         isMeasuringSources = true
@@ -218,35 +230,46 @@ final class BackupService: ObservableObject {
 
         work.async {
             for path in targets {
-                let files = BackupService.countFiles(in: path, excluding: rules)
-                let excluded = BackupService.excludedCount(in: path, rules: rules ?? ExclusionRules())
-                let bytes = AppScanner.size(of: path)
+                let source = BackupService.measure(path, excluding: rules)
 
                 var targetFiles: Int?
                 var targetBytes: Int64?
                 if let volume = volume {
                     let destination = BackupService.destinationRoot(volume: volume, source: path)
-                    if FileManager.default.fileExists(atPath: destination) {
-                        targetFiles = BackupService.countFiles(in: destination)
-                        targetBytes = AppScanner.size(of: destination)
-                    } else {
-                        targetFiles = 0
-                        targetBytes = 0
-                    }
+                    let target = BackupService.measure(destination, excluding: nil)
+                    targetFiles = target.files
+                    targetBytes = target.bytes
                 }
 
                 DispatchQueue.main.async {
                     guard let index = self.sourceStates.firstIndex(where: { $0.sourcePath == path })
                     else { return }
-                    self.sourceStates[index].sourceFiles = files
-                    self.sourceStates[index].sourceBytes = bytes
-                    self.sourceStates[index].excludedFiles = excluded
+                    self.sourceStates[index].sourceFiles = source.files
+                    self.sourceStates[index].sourceBytes = source.bytes
+                    self.sourceStates[index].excludedFiles = source.excluded
                     self.sourceStates[index].targetFiles = targetFiles
                     self.sourceStates[index].targetBytes = targetBytes
                 }
             }
             DispatchQueue.main.async { self.isMeasuringSources = false }
         }
+    }
+
+    /// Files per second the last run achieved, used to predict the next one.
+    ///
+    /// Worth showing because the figure is dominated by the destination
+    /// filesystem, not by this Mac: a drive formatted NTFS or exFAT pays a
+    /// large per-file penalty that a big-file transfer never reveals.
+    var measuredFilesPerSecond: Double {
+        let recent = history.runs.suffix(5).filter { $0.succeeded && $0.files > 20 }
+        if recent.isEmpty { return 0 }
+        return lastKnownRate > 0 ? lastKnownRate : 0
+    }
+
+    func estimatedDuration(files: Int) -> TimeInterval? {
+        let rate = lastKnownRate > 0 ? lastKnownRate : 180
+        if files <= 0 { return nil }
+        return Double(files) / rate
     }
 
     // MARK: - Interruption handling
@@ -552,41 +575,55 @@ final class BackupService: ObservableObject {
         }
     }
 
-    /// Counts files, applying the same exclusions rsync will.
+    /// Counts and sizes a folder in a single pass, applying the same exclusions
+    /// rsync will.
     ///
-    /// Counting everything and copying a subset was actively misleading: a
-    /// folder reported 607,704 files while only around 9,000 would ever be
-    /// copied, because the rest sat inside excluded build folders.
-    static func countFiles(in path: String, excluding rules: ExclusionRules? = nil) -> Int {
-        if !FileManager.default.fileExists(atPath: path) { return 0 }
-
-        var command = "find \(quote(path))"
-
-        if let rules = rules {
-            let folders = rules.activeFolderPatterns
-            if !folders.isEmpty {
-                let clause = folders.map { "-name \(quote($0))" }.joined(separator: " -o ")
-                command += " \\( \(clause) \\) -prune -o"
-            }
-            command += " -type f"
-            for ext in rules.activeExtensionPatterns {
-                command += " ! -name \(quote("*." + ext))"
-            }
-            command += " -print"
-        } else {
-            command += " -type f -print"
-        }
-
-        let result = Shell.sh(command + " 2>/dev/null | wc -l")
-        return Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    /// This used to be five separate walks per folder — a count, a count
+    /// without rules, a `du`, then the same again for the destination — which
+    /// on a 600,000-file folder meant roughly a minute of work every time a
+    /// checkbox was clicked. One walk returns everything the UI needs.
+    struct FolderMeasurement {
+        var files = 0
+        var bytes: Int64 = 0
+        var excluded = 0
     }
 
-    /// How many files the current rules are keeping out of a folder, so the
-    /// number is visible rather than implied.
-    static func excludedCount(in path: String, rules: ExclusionRules) -> Int {
-        let all = countFiles(in: path)
-        let kept = countFiles(in: path, excluding: rules)
-        return max(0, all - kept)
+    static func measure(_ path: String, excluding rules: ExclusionRules?) -> FolderMeasurement {
+        var result = FolderMeasurement()
+        guard FileManager.default.fileExists(atPath: path) else { return result }
+
+        let keys: [URLResourceKey] = [.isDirectoryKey, .totalFileAllocatedSizeKey]
+        guard let walker = FileManager.default.enumerator(
+                at: URL(fileURLWithPath: path),
+                includingPropertiesForKeys: keys,
+                options: []) else { return result }
+
+        for case let url as URL in walker {
+            let name = url.lastPathComponent
+            let values = try? url.resourceValues(forKeys: Set(keys))
+
+            if values?.isDirectory == true {
+                if rules?.excludes(name: name, path: url.path) == true {
+                    // Everything beneath an excluded folder is excluded too, and
+                    // counting it would mean walking what we just chose to skip.
+                    walker.skipDescendants()
+                }
+                continue
+            }
+
+            if rules?.excludes(name: name, path: url.path) == true {
+                result.excluded += 1
+                continue
+            }
+
+            result.files += 1
+            result.bytes += Int64(values?.totalFileAllocatedSize ?? 0)
+        }
+        return result
+    }
+
+    static func countFiles(in path: String, excluding rules: ExclusionRules? = nil) -> Int {
+        return measure(path, excluding: rules).files
     }
 
     private static func quote(_ path: String) -> String {
@@ -620,6 +657,23 @@ final class BackupService: ObservableObject {
             status: .running,
             lastMessage: nil)
 
+        execute(job: fresh, resuming: false, completion: completion)
+    }
+
+    /// Runs against an explicitly supplied volume. Used by the test harness so
+    /// a backup can be exercised without a physical drive attached.
+    func runForTesting(volume: BackupVolume, completion: @escaping (Bool) -> Void) {
+        let fresh = BackupJob(
+            id: UUID().uuidString, startedAt: Date(), lastHeartbeat: Date(),
+            volumePath: volume.path, volumeName: volume.name,
+            versionStamp: BackupService.timestamp(),
+            keepVersions: keepVersions, skipBuildFolders: skipBuildFolders,
+            patterns: exclusions?.activePatterns ?? BackupService.buildJunk,
+            sources: sources.map {
+                BackupJob.SourceProgress(path: $0, state: .pending, copiedFiles: 0,
+                                         copiedBytes: 0, pendingFiles: 0, pendingBytes: 0)
+            },
+            status: .running, lastMessage: nil)
         execute(job: fresh, resuming: false, completion: completion)
     }
 
@@ -718,8 +772,20 @@ final class BackupService: ObservableObject {
                 self.persist(current, force: true)
 
                 let finished = DispatchSemaphore(value: 0)
+                // This folder starts from zero; earlier folders are the base.
+                let baseFiles = current.sources.prefix(index).reduce(0) { $0 + $1.copiedFiles }
+                let baseBytes = current.sources.prefix(index).reduce(Int64(0)) { $0 + $1.copiedBytes }
                 var sourceFiles = current.sources[index].copiedFiles
                 var sourceBytes = current.sources[index].copiedBytes
+
+                // Progress is accumulated on the reader thread and pushed to the
+                // UI on a timer. Publishing per file meant a full SwiftUI
+                // re-render for every one of them — at a few hundred files a
+                // second that saturates the main thread, which is what made the
+                // window feel frozen and starved the copy itself.
+                var lastPush = Date.distantPast
+                var latestFile = ""
+                let startedCopying = Date()
 
                 let process = Shell.stream(
                     "/usr/bin/rsync",
@@ -734,19 +800,31 @@ final class BackupService: ObservableObject {
                               parsed.isFile else { return }
                         sourceFiles += 1
                         sourceBytes += parsed.bytes
+                        latestFile = name + "/" + parsed.path
+
+                        // Ten updates a second is past the point anyone can read
+                        // and far below the point it costs anything.
+                        let now = Date()
+                        if now.timeIntervalSince(lastPush) < 0.1 { return }
+                        lastPush = now
+
+                        let files = sourceFiles
+                        let bytes = sourceBytes
+                        let showing = latestFile
+                        let elapsed = now.timeIntervalSince(startedCopying)
 
                         DispatchQueue.main.async {
-                            self.currentFile = name + "/" + parsed.path
-                            self.copiedFiles += 1
-                            self.copiedBytes += parsed.bytes
+                            self.currentFile = showing
+                            self.copiedFiles = baseFiles + files
+                            self.copiedBytes = baseBytes + bytes
+                            if elapsed > 1 { self.lastKnownRate = Double(files) / elapsed }
                             if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
-                                self.sourceStates[row].copiedFiles = sourceFiles
-                                self.sourceStates[row].copiedBytes = sourceBytes
+                                self.sourceStates[row].copiedFiles = files
+                                self.sourceStates[row].copiedBytes = bytes
                             }
-                            current.sources[index].copiedFiles = sourceFiles
-                            current.sources[index].copiedBytes = sourceBytes
+                            current.sources[index].copiedFiles = files
+                            current.sources[index].copiedBytes = bytes
                             current.lastHeartbeat = Date()
-                            self.job = current
                             self.persist(current)
                         }
                     },
@@ -755,6 +833,13 @@ final class BackupService: ObservableObject {
                             current.sources[index].state = status == 0 ? .done : .failed
                             current.sources[index].copiedFiles = sourceFiles
                             current.sources[index].copiedBytes = sourceBytes
+                            // The throttle may have dropped the last update.
+                            self.copiedFiles = baseFiles + sourceFiles
+                            self.copiedBytes = baseBytes + sourceBytes
+                            if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
+                                self.sourceStates[row].copiedFiles = sourceFiles
+                                self.sourceStates[row].copiedBytes = sourceBytes
+                            }
                             current.lastHeartbeat = Date()
 
                             if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
@@ -937,22 +1022,34 @@ final class BackupService: ObservableObject {
     /// Writes every tagged file's tags next to the backup, as a plain JSON map
     /// of relative path to tags, so tagging survives a filesystem that cannot
     /// carry extended attributes.
+    /// Writes tags alongside the backup, because NTFS and exFAT cannot carry
+    /// extended attributes and the tags would otherwise be lost on copy.
+    ///
+    /// Spotlight is asked which files are tagged rather than walking every file
+    /// and reading its attributes — the walk added a full pass over hundreds of
+    /// thousands of files to the end of every run, to find a handful of tags.
     private func writeTagSidecar(volume: BackupVolume, sources: [String]) -> Int {
         var map: [String: [String]] = [:]
-        let fm = FileManager.default
 
         for source in sources {
             let name = (source as NSString).lastPathComponent
-            guard let walker = fm.enumerator(atPath: source) else { continue }
-            for case let relative as String in walker {
-                let full = source + "/" + relative
-                let tags = TagStore.tags(of: full)
-                if !tags.isEmpty { map[name + "/" + relative] = tags }
+            let result = Shell.run("/usr/bin/mdfind",
+                                   ["-onlyin", source, "kMDItemUserTags == '*'"])
+
+            for path in result.out.nonEmptyLines {
+                let tags = TagStore.tags(of: path)
+                if tags.isEmpty { continue }
+                var relative = path
+                if relative.hasPrefix(source) {
+                    relative = String(relative.dropFirst(source.count))
+                    if relative.hasPrefix("/") { relative.removeFirst() }
+                }
+                map[name + "/" + relative] = tags
             }
         }
 
         let folder = volume.path + "/" + BackupService.backupFolderName
-        try? fm.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
