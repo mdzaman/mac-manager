@@ -25,19 +25,14 @@ final class ExclusionRules: ObservableObject {
         didSet { save() }
     }
 
-    private var fileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = base.appendingPathComponent("MacManager", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("exclusions.json")
-    }
+    static let fileName = "exclusions.json"
+
+    private(set) var loadProblem: String?
 
     init() {
-        if let data = try? Data(contentsOf: fileURL),
-           let saved = try? JSONDecoder().decode([ExclusionRule].self, from: data),
-           !saved.isEmpty {
+        let result = StateStore.load([ExclusionRule].self, from: ExclusionRules.fileName)
+        loadProblem = result.problem
+        if let saved = result.value, !saved.isEmpty {
             rules = saved
         } else {
             rules = ExclusionRules.recommended
@@ -45,10 +40,7 @@ final class ExclusionRules: ObservableObject {
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .prettyPrinted
-        guard let data = try? encoder.encode(rules) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        StateStore.save(rules, as: ExclusionRules.fileName)
     }
 
     // MARK: - Recommendations

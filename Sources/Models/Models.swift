@@ -618,3 +618,78 @@ struct BackupSourceState: Identifiable {
         return min(1, Double(target) / Double(source))
     }
 }
+
+// MARK: - Resumable jobs
+
+/// A backup run, persisted so it survives the app quitting, the Mac sleeping,
+/// or the drive being unplugged mid-copy.
+struct BackupJob: Codable {
+
+    var id: String
+    var startedAt: Date
+    /// Updated as work proceeds. A job still marked `running` at launch, with a
+    /// stale heartbeat, is one that was interrupted rather than finished.
+    var lastHeartbeat: Date
+
+    var volumePath: String
+    var volumeName: String
+    /// Reused on resume so replaced files keep landing in the same versions
+    /// folder rather than scattering across several timestamps.
+    var versionStamp: String
+
+    var keepVersions: Bool
+    var skipBuildFolders: Bool
+    var patterns: [String]
+
+    var sources: [SourceProgress]
+    var status: Status
+    var lastMessage: String?
+
+    struct SourceProgress: Codable {
+        let path: String
+        var state: State
+        var copiedFiles: Int
+        var copiedBytes: Int64
+        var pendingFiles: Int
+        var pendingBytes: Int64
+
+        var name: String { return (path as NSString).lastPathComponent }
+
+        enum State: String, Codable {
+            case pending, running, done, failed
+        }
+    }
+
+    enum Status: String, Codable {
+        case running
+        case interrupted
+        case completed
+        case failed
+
+        var label: String {
+            switch self {
+            case .running: return "In progress"
+            case .interrupted: return "Interrupted"
+            case .completed: return "Finished"
+            case .failed: return "Failed"
+            }
+        }
+    }
+
+    var copiedFiles: Int { return sources.reduce(0) { $0 + $1.copiedFiles } }
+    var copiedBytes: Int64 { return sources.reduce(0) { $0 + $1.copiedBytes } }
+    var pendingBytes: Int64 { return sources.reduce(0) { $0 + $1.pendingBytes } }
+
+    var remainingSources: [SourceProgress] {
+        return sources.filter { $0.state != .done }
+    }
+
+    var isResumable: Bool {
+        return (status == .interrupted || status == .running) && !remainingSources.isEmpty
+    }
+
+    var describeProgress: String {
+        let done = sources.filter { $0.state == .done }.count
+        return "\(done) of \(sources.count) folders finished · \(copiedFiles) files copied"
+    }
+}

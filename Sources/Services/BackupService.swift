@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Mirrors folders to an external drive, keeping previous versions of anything
@@ -32,6 +33,20 @@ final class BackupService: ObservableObject {
     @Published private(set) var copiedBytes: Int64 = 0
     @Published private(set) var totalPendingBytes: Int64 = 0
     @Published private(set) var startedAt: Date?
+
+    /// The persisted job. Kept on disk so an interrupted run can be picked up
+    /// where it stopped rather than started over.
+    @Published private(set) var job: BackupJob?
+    @Published private(set) var resumable: BackupJob?
+    @Published private(set) var interruptionReason: String?
+
+    /// Held so the transfer can be stopped the moment the drive disappears,
+    /// instead of rsync writing into a stale mount point.
+    private var activeProcess: Process?
+    private var lastJournalWrite = Date.distantPast
+    private var observersInstalled = false
+
+    static let jobFileName = "backup-job.json"
 
     /// Overall fraction copied, by bytes — file counts mislead when one file is
     /// a gigabyte and the next is a kilobyte.
@@ -80,6 +95,145 @@ final class BackupService: ObservableObject {
     /// Everything lands under one folder so the drive stays usable for other
     /// things.
     static let backupFolderName = "MacManager Backup"
+
+    // MARK: - Interruption handling
+
+    /// Call once at startup. Recovers an interrupted job and starts listening
+    /// for the events that can break a backup: the drive going away, and the
+    /// machine sleeping.
+    func begin() {
+        recoverInterruptedJob()
+        installObservers()
+    }
+
+    private func recoverInterruptedJob() {
+        let result = StateStore.load(BackupJob.self, from: BackupService.jobFileName)
+        if let problem = result.problem { interruptionReason = problem }
+
+        guard var saved = result.value else { return }
+
+        if saved.status == .running {
+            // Still marked running with nobody running it — the app was quit,
+            // crashed, or the Mac was shut down mid-copy.
+            saved.status = .interrupted
+            saved.lastMessage = "The app stopped before this backup finished."
+            StateStore.save(saved, as: BackupService.jobFileName)
+        }
+
+        if saved.isResumable {
+            resumable = saved
+            job = saved
+        }
+    }
+
+    private func installObservers() {
+        if observersInstalled { return }
+        observersInstalled = true
+
+        let center = NSWorkspace.shared.notificationCenter
+
+        // Unmounting is the common case: someone unplugs the drive mid-copy.
+        center.addObserver(forName: NSWorkspace.willUnmountNotification,
+                           object: nil, queue: .main) { [weak self] note in
+            self?.handleUnmount(note, imminent: true)
+        }
+        center.addObserver(forName: NSWorkspace.didUnmountNotification,
+                           object: nil, queue: .main) { [weak self] note in
+            self?.handleUnmount(note, imminent: false)
+        }
+
+        // A reconnected drive is the cue to offer resuming.
+        center.addObserver(forName: NSWorkspace.didMountNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            self?.refreshVolumes()
+            self?.offerResumeIfDriveIsBack()
+        }
+
+        center.addObserver(forName: NSWorkspace.willSleepNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            self?.handleSleep()
+        }
+        center.addObserver(forName: NSWorkspace.didWakeNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            self?.handleWake()
+        }
+    }
+
+    private func volumePath(from note: Notification) -> String? {
+        if let url = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL { return url.path }
+        return nil
+    }
+
+    private func handleUnmount(_ note: Notification, imminent: Bool) {
+        guard let path = volumePath(from: note) else { return }
+        guard var current = job, current.volumePath == path, isRunning else { return }
+
+        // Stop immediately rather than letting rsync write into a mount point
+        // that is no longer there.
+        activeProcess?.terminate()
+        activeProcess = nil
+
+        current.status = .interrupted
+        current.lastMessage = "The drive was disconnected during the backup."
+        persist(current)
+
+        job = current
+        resumable = current
+        isRunning = false
+        currentFile = nil
+        interruptionReason = "\(current.volumeName) was disconnected. Reconnect it and the backup can carry on from where it stopped."
+        summary = "Backup interrupted — \(current.describeProgress)."
+    }
+
+    private func handleSleep() {
+        guard var current = job, isRunning else { return }
+        current.lastHeartbeat = Date()
+        current.lastMessage = "The Mac went to sleep during this backup."
+        persist(current)
+        // rsync usually survives sleep; the drive vanishing is what breaks it,
+        // and that arrives separately as an unmount.
+    }
+
+    private func handleWake() {
+        guard let current = job, current.status == .running || current.status == .interrupted else { return }
+        refreshVolumes()
+
+        // If the drive did not come back with the machine, the run is over
+        // until it is reconnected.
+        if !FileManager.default.fileExists(atPath: current.volumePath) {
+            var updated = current
+            updated.status = .interrupted
+            updated.lastMessage = "The drive was not connected after waking."
+            persist(updated)
+            job = updated
+            resumable = updated
+            isRunning = false
+            interruptionReason = "\(updated.volumeName) is not connected. Reconnect it to carry on."
+        }
+    }
+
+    private func offerResumeIfDriveIsBack() {
+        guard let current = job ?? resumable, current.isResumable else { return }
+        if FileManager.default.fileExists(atPath: current.volumePath) {
+            resumable = current
+            destinationVolume = current.volumePath
+            interruptionReason = "\(current.volumeName) is back. \(current.describeProgress)."
+        }
+    }
+
+    /// Writes the journal, throttled — a backup copying thousands of small
+    /// files would otherwise spend its time writing state instead of data.
+    private func persist(_ current: BackupJob, force: Bool = false) {
+        if !force && Date().timeIntervalSince(lastJournalWrite) < 2.0 { return }
+        lastJournalWrite = Date()
+        StateStore.save(current, as: BackupService.jobFileName)
+    }
+
+    func dismissResume() {
+        resumable = nil
+        interruptionReason = nil
+        StateStore.reset(BackupService.jobFileName)
+    }
 
     // MARK: - Volumes
 
@@ -243,102 +397,208 @@ final class BackupService: ObservableObject {
 
     // MARK: - Running
 
-    /// Runs the backup, reporting each file as rsync copies it.
-    ///
-    /// Sources are handled one after another rather than in parallel: they
-    /// share one drive, and competing for it would be slower as well as making
-    /// progress meaningless.
+    /// Starts a fresh backup.
     func run(completion: @escaping (Bool) -> Void) {
         guard let volume = selectedVolume else { completion(false); return }
         if isRunning { return }
 
-        isRunning = true
-        log = []
-        summary = nil
-        copiedFiles = 0
-        copiedBytes = 0
-        currentFile = nil
-        startedAt = Date()
+        let fresh = BackupJob(
+            id: UUID().uuidString,
+            startedAt: Date(),
+            lastHeartbeat: Date(),
+            volumePath: volume.path,
+            volumeName: volume.name,
+            versionStamp: BackupService.timestamp(),
+            keepVersions: keepVersions,
+            skipBuildFolders: skipBuildFolders,
+            patterns: exclusions?.activePatterns ?? BackupService.buildJunk,
+            sources: sources.map { path in
+                let state = sourceStates.first { $0.sourcePath == path }
+                return BackupJob.SourceProgress(
+                    path: path, state: .pending, copiedFiles: 0, copiedBytes: 0,
+                    pendingFiles: state?.pendingFiles ?? 0,
+                    pendingBytes: state?.pendingBytes ?? 0)
+            },
+            status: .running,
+            lastMessage: nil)
 
-        for index in sourceStates.indices {
-            sourceStates[index].copiedFiles = 0
-            sourceStates[index].copiedBytes = 0
+        execute(job: fresh, resuming: false, completion: completion)
+    }
+
+    /// Picks an interrupted job back up.
+    ///
+    /// Folders already finished are skipped entirely, and within a folder rsync
+    /// skips files whose size and timestamp already match — so resuming costs a
+    /// scan rather than a re-copy. `--partial` keeps a half-written file so the
+    /// next run continues it instead of starting that file again.
+    func resume(completion: @escaping (Bool) -> Void) {
+        guard var current = resumable ?? job, current.isResumable else { completion(false); return }
+        guard FileManager.default.fileExists(atPath: current.volumePath) else {
+            interruptionReason = "\(current.volumeName) is not connected."
+            completion(false)
+            return
         }
 
-        let sourceList = sources
-        let versioned = keepVersions
-        let skipJunk = skipBuildFolders
-        let patterns = exclusions?.activePatterns
-        let stamp = BackupService.timestamp()
+        current.status = .running
+        current.lastHeartbeat = Date()
+        current.lastMessage = nil
+        resumable = nil
+        interruptionReason = nil
+
+        execute(job: current, resuming: true, completion: completion)
+    }
+
+    /// Copies each remaining folder in turn, journalling as it goes.
+    ///
+    /// Sources run one after another rather than together: they share a single
+    /// drive, so competing for it would be slower and would make progress
+    /// impossible to report honestly.
+    private func execute(job start: BackupJob, resuming: Bool, completion: @escaping (Bool) -> Void) {
+        isRunning = true
+        summary = nil
+        currentFile = nil
+        startedAt = Date()
+        interruptionReason = nil
+
+        var current = start
+        job = current
+        persist(current, force: true)
+
+        // Resuming keeps what was already copied in the totals.
+        copiedFiles = current.copiedFiles
+        copiedBytes = current.copiedBytes
+        totalPendingBytes = current.pendingBytes
+
+        log = [resuming
+                ? "Resuming — \(current.describeProgress)"
+                : "Starting backup to \(current.volumeName)…"]
+
+        // Rebuild the display rows so a resumed job shows its history.
+        sourceStates = current.sources.map { source in
+            var state = BackupSourceState(sourcePath: source.path, name: source.name)
+            state.pendingFiles = source.pendingFiles
+            state.pendingBytes = source.pendingBytes
+            state.copiedFiles = source.copiedFiles
+            state.copiedBytes = source.copiedBytes
+            state.status = source.state == .done ? .done : .ready
+            return state
+        }
 
         work.async {
             var ok = true
 
-            for source in sourceList {
-                let name = (source as NSString).lastPathComponent
-                let destination = BackupService.destinationRoot(volume: volume, source: source)
-                let versionsFolder = versioned
-                    ? volume.path + "/" + BackupService.backupFolderName + "/_versions/"
-                        + stamp + "/" + name
-                    : nil
+            for (index, source) in current.sources.enumerated() {
+                if source.state == .done { continue }
 
-                DispatchQueue.main.async {
-                    self.log.append("Backing up \(name)…")
-                    if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
-                        self.sourceStates[index].status = .running
+                // The drive can vanish between folders as easily as during one.
+                if !FileManager.default.fileExists(atPath: current.volumePath) {
+                    DispatchQueue.main.async {
+                        current.status = .interrupted
+                        current.lastMessage = "The drive disconnected."
+                        self.finishInterrupted(current)
+                        completion(false)
                     }
+                    return
                 }
 
-                // Each source runs to completion before the next starts, so the
-                // semaphore turns the async stream back into a sequence.
+                let name = source.name
+                let destination = current.volumePath + "/" + BackupService.backupFolderName + "/" + name
+                let versionsFolder = current.keepVersions
+                    ? current.volumePath + "/" + BackupService.backupFolderName
+                        + "/_versions/" + current.versionStamp + "/" + name
+                    : nil
+
+                current.sources[index].state = .running
+                let snapshot = current
+                DispatchQueue.main.async {
+                    self.job = snapshot
+                    self.log.append("Backing up \(name)…")
+                    if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
+                        self.sourceStates[row].status = .running
+                    }
+                }
+                self.persist(current, force: true)
+
                 let finished = DispatchSemaphore(value: 0)
+                var sourceFiles = current.sources[index].copiedFiles
+                var sourceBytes = current.sources[index].copiedBytes
 
-                Shell.stream("/usr/bin/rsync",
-                             BackupService.arguments(source: source,
-                                                     destination: destination,
-                                                     dryRun: false,
-                                                     versionsFolder: versionsFolder,
-                                                     skipBuildJunk: skipJunk,
-                                                     patterns: patterns),
-                             onLine: { line in
-                                 guard let parsed = BackupService.parseTransferLine(line),
-                                       parsed.isFile else { return }
-                                 DispatchQueue.main.async {
-                                     self.currentFile = name + "/" + parsed.path
-                                     self.copiedFiles += 1
-                                     self.copiedBytes += parsed.bytes
-                                     if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
-                                         self.sourceStates[index].copiedFiles += 1
-                                         self.sourceStates[index].copiedBytes += parsed.bytes
-                                     }
-                                 }
-                             },
-                             completion: { status, errorText in
-                                 DispatchQueue.main.async {
-                                     if let index = self.sourceStates.firstIndex(where: { $0.sourcePath == source }) {
-                                         self.sourceStates[index].status = status == 0 ? .done : .failed
-                                     }
-                                     if status == 0 {
-                                         self.log.append("  \(name) done")
-                                     } else {
-                                         ok = false
-                                         let message = errorText.nonEmptyLines.first
-                                             ?? "rsync exited \(status)"
-                                         self.log.append("  ⚠︎ \(name): \(message)")
-                                     }
-                                 }
-                                 finished.signal()
-                             })
+                let process = Shell.stream(
+                    "/usr/bin/rsync",
+                    BackupService.arguments(source: source.path,
+                                            destination: destination,
+                                            dryRun: false,
+                                            versionsFolder: versionsFolder,
+                                            skipBuildJunk: current.skipBuildFolders,
+                                            patterns: current.patterns),
+                    onLine: { line in
+                        guard let parsed = BackupService.parseTransferLine(line),
+                              parsed.isFile else { return }
+                        sourceFiles += 1
+                        sourceBytes += parsed.bytes
 
+                        DispatchQueue.main.async {
+                            self.currentFile = name + "/" + parsed.path
+                            self.copiedFiles += 1
+                            self.copiedBytes += parsed.bytes
+                            if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
+                                self.sourceStates[row].copiedFiles = sourceFiles
+                                self.sourceStates[row].copiedBytes = sourceBytes
+                            }
+                            current.sources[index].copiedFiles = sourceFiles
+                            current.sources[index].copiedBytes = sourceBytes
+                            current.lastHeartbeat = Date()
+                            self.job = current
+                            self.persist(current)
+                        }
+                    },
+                    completion: { status, errorText in
+                        DispatchQueue.main.async {
+                            current.sources[index].state = status == 0 ? .done : .failed
+                            current.sources[index].copiedFiles = sourceFiles
+                            current.sources[index].copiedBytes = sourceBytes
+                            current.lastHeartbeat = Date()
+
+                            if let row = self.sourceStates.firstIndex(where: { $0.sourcePath == source.path }) {
+                                self.sourceStates[row].status = status == 0 ? .done : .failed
+                            }
+                            if status == 0 {
+                                self.log.append("  \(name) done — \(sourceFiles) files")
+                            } else {
+                                ok = false
+                                let message = errorText.nonEmptyLines.first ?? "rsync exited \(status)"
+                                self.log.append("  ⚠︎ \(name): \(message)")
+                            }
+                            self.job = current
+                            self.persist(current, force: true)
+                        }
+                        finished.signal()
+                    })
+
+                DispatchQueue.main.async { self.activeProcess = process }
                 finished.wait()
+                DispatchQueue.main.async { self.activeProcess = nil }
+
+                // A terminated transfer means something took the drive away.
+                if !self.isRunningFlag() { return }
             }
 
-            let tagCount = self.writeTagSidecar(volume: volume, sources: sourceList)
+            let tagCount = self.writeTagSidecar(volume: BackupVolume(
+                name: current.volumeName, path: current.volumePath,
+                totalBytes: 0, freeBytes: 0, isRemovable: true, fileSystem: ""),
+                sources: current.sources.map { $0.path })
 
             DispatchQueue.main.async {
+                current.status = ok ? .completed : .failed
+                current.lastHeartbeat = Date()
+                self.job = current
+                self.persist(current, force: true)
+
                 self.isRunning = false
+                self.activeProcess = nil
                 self.lastRun = Date()
                 self.currentFile = nil
+                self.resumable = nil
                 self.log.append("Saved tags for \(tagCount) files to tags.json")
                 self.summary = ok
                     ? "Backed up \(self.copiedFiles) files — \(Fmt.bytes(self.copiedBytes))."
@@ -346,6 +606,26 @@ final class BackupService: ObservableObject {
                 completion(ok)
             }
         }
+    }
+
+    /// Reading `isRunning` from the work queue; it is cleared on the main queue
+    /// when the drive disappears.
+    private func isRunningFlag() -> Bool {
+        var value = false
+        DispatchQueue.main.sync { value = self.isRunning }
+        return value
+    }
+
+    private func finishInterrupted(_ interrupted: BackupJob) {
+        var updated = interrupted
+        updated.status = .interrupted
+        persist(updated, force: true)
+        job = updated
+        resumable = updated
+        isRunning = false
+        activeProcess = nil
+        currentFile = nil
+        summary = "Backup interrupted — \(updated.describeProgress)."
     }
 
     private static func destinationRoot(volume: BackupVolume, source: String) -> String {
@@ -361,7 +641,9 @@ final class BackupService: ObservableObject {
                                   versionsFolder: String?,
                                   skipBuildJunk: Bool = true,
                                   patterns: [String]? = nil) -> [String] {
-        var args = ["-rlt", "--out-format=%i|%l|%n"]
+        // --partial keeps a half-transferred file so an interrupted run continues
+        // it rather than starting that file over.
+        var args = ["-rlt", "--partial", "--out-format=%i|%l|%n"]
         if dryRun { args.append("--dry-run") }
         if skipBuildJunk {
             for pattern in patterns ?? buildJunk { args.append("--exclude=\(pattern)") }

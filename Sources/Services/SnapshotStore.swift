@@ -25,31 +25,24 @@ final class SnapshotStore {
     /// rather than append so navigating around does not flood the history.
     private let coalesceWindow: TimeInterval = 15 * 60
 
-    private let fileURL: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = base.appendingPathComponent("MacManager", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("history.json")
-    }()
+    static let fileName = "history.json"
+
+    /// Set when the last load had to fall back to the backup copy or start
+    /// over, so the UI can say so rather than silently losing history.
+    private(set) var loadProblem: String?
 
     private init() { load() }
 
     // MARK: - Persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        history = (try? decoder.decode([String: [SizeSample]].self, from: data)) ?? [:]
+        let result = StateStore.load([String: [SizeSample]].self, from: SnapshotStore.fileName)
+        history = result.value ?? [:]
+        loadProblem = result.problem
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        guard let data = try? encoder.encode(history) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        StateStore.save(history, as: SnapshotStore.fileName)
     }
 
     // MARK: - Recording
@@ -115,6 +108,6 @@ final class SnapshotStore {
 
     func reset() {
         history = [:]
-        try? FileManager.default.removeItem(at: fileURL)
+        StateStore.reset(SnapshotStore.fileName)
     }
 }

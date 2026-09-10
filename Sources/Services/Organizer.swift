@@ -18,14 +18,8 @@ final class Organizer: ObservableObject {
 
     private let work = DispatchQueue(label: "com.macmanager.organizer", qos: .userInitiated)
 
-    private var undoURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = base.appendingPathComponent("MacManager", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("last-organize.json")
-    }
+    static let undoFileName = "last-organize.json"
+    private var undoURL: URL { return StateStore.url(Organizer.undoFileName) }
 
     init() {
         canUndo = FileManager.default.fileExists(atPath: undoURL.path)
@@ -201,17 +195,11 @@ final class Organizer: ObservableObject {
     // MARK: - Undo
 
     private func writeUndo(_ record: UndoRecord) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        guard let data = try? encoder.encode(record) else { return }
-        try? data.write(to: undoURL, options: .atomic)
+        StateStore.save(record, as: Organizer.undoFileName)
     }
 
     func undoLastRun(completion: @escaping (Int, [String]) -> Void) {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        guard let data = try? Data(contentsOf: undoURL),
-              let record = try? decoder.decode(UndoRecord.self, from: data) else {
+        guard let record = StateStore.load(UndoRecord.self, from: Organizer.undoFileName).value else {
             completion(0, ["No organize run to undo."])
             return
         }
@@ -242,7 +230,7 @@ final class Organizer: ObservableObject {
                 if meaningful.isEmpty { try? fm.removeItem(atPath: folder) }
             }
 
-            try? fm.removeItem(at: self.undoURL)
+            StateStore.reset(Organizer.undoFileName)
 
             DispatchQueue.main.async {
                 self.canUndo = false
@@ -253,10 +241,7 @@ final class Organizer: ObservableObject {
     }
 
     var undoDescription: String? {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        guard let data = try? Data(contentsOf: undoURL),
-              let record = try? decoder.decode(UndoRecord.self, from: data) else { return nil }
+        guard let record = StateStore.load(UndoRecord.self, from: Organizer.undoFileName).value else { return nil }
         return "\(record.moves.count) files moved \(Fmt.relative(record.time).lowercased())"
     }
 }

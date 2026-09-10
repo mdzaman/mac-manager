@@ -26,32 +26,14 @@ struct BackupView: View {
                 .disabled(backup.selectedVolume == nil || backup.isScanning || backup.isRunning)
             }
         }) {
+            interruptionSection(p: p, backup: backup)
             drives(p: p, backup: backup)
             sources(p: p, backup: backup)
             options(p: p, backup: backup)
-
-            if let summary = backup.summary {
-                Card {
-                    HStack(spacing: 8) {
-                        Image(systemName: backup.changes.isEmpty && !backup.isRunning
-                                ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
-                            .font(.system(size: 13)).foregroundColor(p.good)
-                        Text(summary).font(.system(size: 12, weight: .medium)).foregroundColor(p.textPrimary)
-                        Spacer()
-                        if !backup.changes.isEmpty && !backup.isRunning {
-                            Button(action: { self.confirmRun = true }) { Text("Back up now") }
-                        }
-                    }
-                }
-            }
-
-            if backup.isRunning || backup.lastRun != nil || !backup.log.isEmpty {
-                progressCard(p: p, backup: backup)
-            }
-            if !backup.sourceStates.isEmpty { sourceStatesCard(p: p, backup: backup) }
-            if !backup.changes.isEmpty { changeList(p: p, backup: backup) }
-
+            summarySection(p: p, backup: backup)
+            progressSection(p: p, backup: backup)
             versionsCard(p: p, backup: backup)
+            stateHealthCard(p: p)
             safetyNote(p: p, backup: backup)
         }
         .onAppear { if backup.volumes.isEmpty { backup.refreshVolumes() } }
@@ -73,6 +55,93 @@ struct BackupView: View {
             ? " Files being replaced are moved into a dated versions folder first, so the previous copy is kept."
             : " Replaced files are overwritten, with no previous version kept."
         return "\(files) files will be copied.\(versions) Nothing on the drive is ever deleted."
+    }
+
+    @ViewBuilder
+    private func interruptionSection(p: Palette, backup: BackupService) -> some View {
+        if let interrupted = backup.resumable {
+            resumeBanner(p: p, backup: backup, job: interrupted)
+        } else if let reason = backup.interruptionReason {
+            noticeBanner(p: p, text: reason)
+        }
+    }
+
+    @ViewBuilder
+    private func summarySection(p: Palette, backup: BackupService) -> some View {
+        if let summary = backup.summary {
+            Card {
+                HStack(spacing: 8) {
+                    Image(systemName: backup.changes.isEmpty && !backup.isRunning
+                            ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                        .font(.system(size: 13)).foregroundColor(p.good)
+                    Text(summary).font(.system(size: 12, weight: .medium))
+                        .foregroundColor(p.textPrimary)
+                    Spacer()
+                    if !backup.changes.isEmpty && !backup.isRunning {
+                        Button(action: { self.confirmRun = true }) { Text("Back up now") }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func progressSection(p: Palette, backup: BackupService) -> some View {
+        if backup.isRunning || backup.lastRun != nil || !backup.log.isEmpty {
+            progressCard(p: p, backup: backup)
+        }
+        if !backup.sourceStates.isEmpty { sourceStatesCard(p: p, backup: backup) }
+        if !backup.changes.isEmpty { changeList(p: p, backup: backup) }
+    }
+
+    /// Shown when a previous run did not finish. Resuming skips folders that
+    /// completed and lets rsync skip files that already match, so it costs a
+    /// scan rather than a re-copy.
+    private func resumeBanner(p: Palette, backup: BackupService, job: BackupJob) -> some View {
+        Card {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .font(.system(size: 20)).foregroundColor(p.serious)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Unfinished backup to \(job.volumeName)")
+                        .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                    Text(job.lastMessage ?? "This backup did not finish.")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                    Text("\(job.describeProgress) · \(Fmt.bytes(job.copiedBytes)) copied · started \(Fmt.relative(job.startedAt).lowercased())")
+                        .font(.system(size: 11)).foregroundColor(p.textMuted)
+
+                    HStack(spacing: 5) {
+                        ForEach(job.sources, id: \.path) { source in
+                            Text(source.name)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(source.state == .done ? p.good : p.textSecondary)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(RoundedRectangle(cornerRadius: 3)
+                                                .fill((source.state == .done ? p.good : p.textMuted).opacity(0.14)))
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+                Spacer()
+                VStack(spacing: 6) {
+                    Button(action: { backup.resume { _ in } }) { Text("Resume") }
+                        .disabled(!FileManager.default.fileExists(atPath: job.volumePath) || backup.isRunning)
+                    Button("Discard") { backup.dismissResume() }
+                }
+            }
+        }
+    }
+
+    private func noticeBanner(p: Palette, text: String) -> some View {
+        Card {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13)).foregroundColor(p.serious)
+                Text(text).font(.system(size: 12)).foregroundColor(p.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+        }
     }
 
     // MARK: - Sections
@@ -455,6 +524,67 @@ struct BackupView: View {
         }
     }
 
+    /// What the app has remembered, and whether it is readable.
+    ///
+    /// Every one of these is written atomically with a previous-good copy kept
+    /// alongside, so a crash or power loss mid-write leaves the old file intact
+    /// rather than a truncated one.
+    private func stateHealthCard(p: Palette) -> some View {
+        let files = StateStore.health().filter { $0.exists }
+        let quarantined = StateStore.quarantinedFiles()
+
+        return Card {
+            HStack {
+                Text("Saved state")
+                    .font(.system(size: 13, weight: .semibold)).foregroundColor(p.textPrimary)
+                Spacer()
+                Button("Show in Finder") { StorageScanner.reveal(StateStore.directory.path) }
+            }
+
+            if files.isEmpty {
+                Text("Nothing saved yet.").font(.system(size: 11)).foregroundColor(p.textMuted)
+            } else {
+                ForEach(files) { file in
+                    HStack(spacing: 8) {
+                        Image(systemName: file.readable ? "checkmark.circle.fill"
+                                                        : "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(file.readable ? p.good : p.critical)
+                        Text(file.name)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(p.textPrimary)
+                        if file.hasBackup {
+                            Text("has backup")
+                                .font(.system(size: 9)).foregroundColor(p.textMuted)
+                        }
+                        Spacer()
+                        Text(Fmt.bytes(file.sizeBytes))
+                            .font(.system(size: 10, design: .rounded)).foregroundColor(p.textSecondary)
+                        Text(Fmt.relative(file.modified))
+                            .font(.system(size: 10)).foregroundColor(p.textMuted)
+                            .frame(width: 90, alignment: .trailing)
+                    }
+                }
+            }
+
+            if !quarantined.isEmpty {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11)).foregroundColor(p.serious)
+                    Text("\(quarantined.count) damaged file\(quarantined.count == 1 ? "" : "s") were set aside rather than deleted.")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                    Spacer()
+                    Button("Clear them") { StateStore.clearQuarantine() }
+                }
+            }
+
+            Text("Each of these is written atomically with the previous version kept beside it, so losing power mid-write leaves the old file intact rather than a half-written one. A file that cannot be read is restored from its backup automatically.")
+                .font(.system(size: 10)).foregroundColor(p.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func safetyNote(p: Palette, backup: BackupService) -> some View {
         Card {
             HStack(alignment: .top, spacing: 8) {
@@ -462,7 +592,7 @@ struct BackupView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("How the backup behaves")
                         .font(.system(size: 12, weight: .medium)).foregroundColor(p.textPrimary)
-                    Text("It copies new and changed files onto the drive and never deletes anything there — so removing a file on your Mac does not remove it from the backup. Preview shows exactly what would be copied before a single byte moves. This is a mirror with history, not a Time Machine replacement: it does not snapshot your whole system, and a copy on a drive that lives next to your Mac is not protection against fire or theft.")
+                    Text("A run is journalled to disk as it goes, so an interrupted backup — the drive unplugged, the Mac asleep or shut down — can carry on from where it stopped rather than starting over. Folders that finished are skipped, and within a folder rsync skips files that already match, so resuming costs a scan rather than a re-copy. It copies new and changed files onto the drive and never deletes anything there — so removing a file on your Mac does not remove it from the backup. Preview shows exactly what would be copied before a single byte moves. This is a mirror with history, not a Time Machine replacement: it does not snapshot your whole system, and a copy on a drive that lives next to your Mac is not protection against fire or theft.")
                         .font(.system(size: 11)).foregroundColor(p.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

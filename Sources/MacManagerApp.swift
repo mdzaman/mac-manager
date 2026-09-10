@@ -109,6 +109,7 @@ final class AppState: ObservableObject {
         storage.refresh()
         memory.start()
         ports.start()
+        backup.begin()
         backup.refreshVolumes()
         search.loadIfNeeded()
     }

@@ -56,25 +56,22 @@ final class SearchIndex: ObservableObject {
         ("25k", 25_000), ("100k", 100_000), ("250k", 250_000), ("1M", 1_000_000),
     ]
 
-    private var indexFileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = base.appendingPathComponent("MacManager", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("index.json")
-    }
+    static let indexFileName = "index.json"
+    private var indexFileURL: URL { return StateStore.url(SearchIndex.indexFileName) }
+    @Published private(set) var loadProblem: String?
 
     // MARK: - Lifecycle
 
     func loadIfNeeded() {
         if !files.isEmpty || isIndexing { return }
         work.async {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .secondsSince1970
-            guard let data = try? Data(contentsOf: self.indexFileURL),
-                  let saved = try? decoder.decode([IndexedFile].self, from: data) else { return }
+            let result = StateStore.load([IndexedFile].self, from: SearchIndex.indexFileName)
+            guard let saved = result.value else {
+                DispatchQueue.main.async { self.loadProblem = result.problem }
+                return
+            }
             DispatchQueue.main.async {
+                self.loadProblem = result.problem
                 self.files = saved
                 self.indexedCount = saved.count
                 self.lastIndexed = (try? self.indexFileURL.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -154,10 +151,7 @@ final class SearchIndex: ObservableObject {
     }
 
     private func persist(_ files: [IndexedFile]) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        guard let data = try? encoder.encode(files) else { return }
-        try? data.write(to: indexFileURL, options: .atomic)
+        StateStore.save(files, as: SearchIndex.indexFileName)
     }
 
     /// Embeds every indexed file across all cores.

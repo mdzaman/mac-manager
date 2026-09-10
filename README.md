@@ -151,6 +151,23 @@ Mirrors chosen folders to an external drive using rsync.
   tags would be silently lost on copy. They are written alongside the backup as
   `tags.json` instead.
 
+**Interruptions are expected, not exceptional.** A run is journalled to disk as
+it proceeds, so a backup cut short — the drive unplugged, the Mac asleep or shut
+down, the app quit — is picked up where it stopped rather than started over.
+Folders that finished are skipped; within a folder rsync skips files that already
+match; `--partial` keeps a half-written file so it continues rather than
+restarting. Unplugging the drive stops the transfer immediately rather than
+letting rsync write into a mount point that is no longer there, and reconnecting
+it offers to carry on.
+
+**State survives corruption.** Everything the app remembers is written
+atomically with the previous good version kept alongside. A crash mid-write
+leaves the old file intact rather than a truncated one; a file that will not
+decode is restored from its backup automatically; and if both are unreadable the
+bad file is set aside rather than deleted, and the app starts fresh instead of
+failing at launch. The Backup tab lists every state file and whether it reads
+cleanly.
+
 It is a mirror with history, not a Time Machine replacement — it does not
 snapshot your whole system, and a drive that lives next to your Mac is not
 protection against fire or theft.
