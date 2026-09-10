@@ -693,3 +693,74 @@ struct BackupJob: Codable {
         return "\(done) of \(sources.count) folders finished · \(copiedFiles) files copied"
     }
 }
+
+// MARK: - Change explorer
+
+/// A file that appeared or changed inside a time window.
+struct ChangedFile: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let sizeBytes: Int64
+    let created: Date
+    let modified: Date
+
+    /// Created inside the window, rather than merely edited during it. The
+    /// distinction matters: new files are growth, edits usually are not.
+    let isNew: Bool
+
+    var displayFolder: String {
+        let home = NSHomeDirectory()
+        let dir = (path as NSString).deletingLastPathComponent
+        if dir.hasPrefix(home) { return "~" + dir.dropFirst(home.count) }
+        return dir
+    }
+}
+
+/// Change rolled up to one folder or file at the level currently being viewed.
+struct ChangeAggregate: Identifiable {
+    var id: String { return path }
+
+    let path: String
+    let name: String
+    let isDirectory: Bool
+
+    var addedBytes: Int64 = 0
+    var updatedBytes: Int64 = 0
+    var addedCount: Int = 0
+    var updatedCount: Int = 0
+    /// Newest change anywhere beneath here — answers "when did this happen".
+    var lastChange: Date = .distantPast
+
+    var totalBytes: Int64 { return addedBytes + updatedBytes }
+    var totalCount: Int { return addedCount + updatedCount }
+}
+
+/// How far back to look.
+enum ChangeWindow: String, CaseIterable, Identifiable {
+    case day = "24 hours"
+    case week = "7 days"
+    case month = "30 days"
+    case quarter = "90 days"
+    case year = "1 year"
+    case custom = "Since…"
+
+    var id: String { return rawValue }
+
+    var days: Int? {
+        switch self {
+        case .day: return 1
+        case .week: return 7
+        case .month: return 30
+        case .quarter: return 90
+        case .year: return 365
+        case .custom: return nil
+        }
+    }
+
+    func cutoff(custom: Date) -> Date {
+        guard let days = days else { return custom }
+        return Date().addingTimeInterval(-Double(days) * 86_400)
+    }
+}

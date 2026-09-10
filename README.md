@@ -23,68 +23,30 @@ cp -R "build/Mac Manager.app" /Applications/
 
 Requires the Xcode Command Line Tools (`xcode-select --install`). Nothing else.
 
-## System tabs
+### Growth
 
-**Overview** *(above)* — memory, storage, app count and open ports at a glance,
-plus large apps you have not opened in over six months.
+**What changed, where, and when — drillable to the file, for any period.**
 
-### Applications
+Most disk tools show what is *big*. This shows what *grew*, attributed down the
+tree. Pick a folder and a window — 24 hours, 7 days, 30 days, 90 days, a year, or
+any date you choose — and it lists which subfolder the growth landed in, then
+lets you open that subfolder and see the same breakdown one level deeper, all the
+way to the individual files.
 
-Everything in `/Applications` and `~/Applications` with its version, size, and
-the date you last opened it. Sort by size to find what is costing you, or by last
-opened to find what you have forgotten about. Removing an app also finds the
-support files it scattered through your Library folders, which a plain
-drag-to-Trash leaves behind — often far larger than the app itself.
+It needs no prior snapshot and no background agent. Every file records when it
+was created and when it was last written, so growth over any period is read
+straight off the disk. A file created inside the window counts as **Added**; one
+created earlier but rewritten inside it counts as **Updated** — which separates
+real growth from an application merely touching its own files. On the machine
+this was built on, a 30-day window over Application Support showed 24.24 GB
+added against 740 MB updated, so almost all of it was genuinely new.
 
-Apps on the sealed system volume are listed for context and marked *Protected*.
+One pass collects the changed files; every level of drill-down is grouped from
+that list, so navigating deeper is instant however large the tree.
 
-![Applications](docs/screenshots/applications.png)
-
-### Memory
-
-A live breakdown of app memory, wired, compressed and cached, with processes
-grouped by the app that owns them — so a browser reads as one row instead of
-forty. Quit asks nicely; Force Quit does not.
-
-![Memory](docs/screenshots/memory.png)
-
-### Storage
-
-Disk capacity, plus the directories that quietly accumulate gigabytes: caches,
-logs, Xcode derived data, package-manager downloads. Each is labelled *Safe to
-clear* or *Review first*. There is also an on-demand measurement of every
-top-level folder in your home directory.
-
-![Storage](docs/screenshots/storage.png)
-
-### Explore
-
-Where the missing space actually is. Finder hides `~/Library` and every
-dot-folder, which is precisely where large caches accumulate — on the machine
-this was built on, **87 of 133 items in the home folder were hidden**.
-
-Explore lists everything: dot-names, hidden-flagged folders, the lot. Sorted
-biggest first, with a Hidden badge on anything Finder omits, breadcrumbs to
-drill down, and shortcuts straight to Library, Containers, Application Support,
-Caches, Developer and the temp folder.
-
-Folders are listed instantly and measured afterwards. A folder's size is not
-known until its whole tree has been walked, and `~/Library` can take minutes —
-so you get the listing immediately and the sizes fill in as they arrive.
-
-### Duplicates
-
-Finds files that are byte-identical under different names, and files that share
-a name but differ inside.
-
-Comparison is by content, never by name. Three passes, cheapest first: group by
-exact size, compare the first 64 KB, then hash the whole file for anything still
-matching — so nothing is called identical until every byte has been checked. Two
-files of the same size with different contents are correctly not duplicates.
-
-Files sharing a name but differing inside are listed separately, because those
-are *versions* rather than duplicates and deleting the wrong one loses work.
-Nothing is preselected there. Everything removed goes to the Trash.
+The one thing timestamps cannot show is deletion — a removed file leaves nothing
+behind to read a date from. Measured snapshots cover that, and are kept alongside
+as *Folders that shrank*.
 
 ### Ports
 

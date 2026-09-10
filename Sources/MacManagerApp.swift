@@ -47,7 +47,7 @@ enum Section: String, CaseIterable, Identifiable {
         case .memory: return "What is using your memory, grouped by app."
         case .storage: return "Where your disk space went, and what is safe to reclaim."
         case .explore: return "Drill into any folder — including the hidden ones Finder will not show you."
-        case .growth: return "What grew, what shrank, and which files changed recently."
+        case .growth: return "What changed, where, and when — drillable to the file, for any period."
         case .find: return "Search your files by meaning as well as by name, and tag them."
         case .organize: return "Sort a messy folder into a structure — previewed first, undoable after."
         case .backup: return "Mirror your folders to an external drive, keeping old versions."
@@ -69,6 +69,7 @@ final class AppState: ObservableObject {
     let backup = BackupService()
     let duplicates = DuplicateFinder()
     let exclusions = ExclusionRules()
+    let growth = GrowthExplorer()
 
     @Published var section: Section = .dashboard
 
@@ -89,6 +90,7 @@ final class AppState: ObservableObject {
             backup.objectWillChange,
             duplicates.objectWillChange,
             exclusions.objectWillChange,
+            growth.objectWillChange,
         ]
         // One exclusion list, shared by everything that walks the disk.
         search.exclusions = exclusions
