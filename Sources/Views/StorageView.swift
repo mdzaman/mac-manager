@@ -21,6 +21,7 @@ struct StorageView: View {
             }
             .disabled(state.storage.isScanning)
         }) {
+            PermissionsCard(permissions: state.permissions)
             capacityCard(p: p, vol: vol)
 
             if let result = lastResult {
@@ -199,6 +200,9 @@ struct StorageView: View {
 
 struct TargetRow: View {
     @Environment(\.colorScheme) private var scheme
+    /// Entries macOS will not let the app touch, counted once when the row
+    /// appears so a clear attempt cannot surprise the user.
+    @State private var protectedCount = 0
     let target: CleanupTarget
     let striped: Bool
     let onClear: () -> Void
@@ -226,11 +230,20 @@ struct TargetRow: View {
                     .font(.system(size: 11))
                     .foregroundColor(p.textSecondary)
                     .lineLimit(1)
-                Text(target.displayPath)
-                    .font(.system(size: 10))
-                    .foregroundColor(p.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 5) {
+                    Text(target.displayPath)
+                        .font(.system(size: 10))
+                        .foregroundColor(p.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if protectedCount > 0 {
+                        Text("\(protectedCount) protected")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(p.serious)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(RoundedRectangle(cornerRadius: 3).fill(p.serious.opacity(0.14)))
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -260,5 +273,10 @@ struct TargetRow: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(striped ? p.track.opacity(0.28) : Color.clear)
+        .onAppear {
+            if target.safety == .safe {
+                protectedCount = Permissions.protectedEntries(in: target.path).count
+            }
+        }
     }
 }

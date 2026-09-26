@@ -338,30 +338,59 @@ final class AppScanner: ObservableObject {
 
     /// Moves paths to the Trash. Nothing here deletes: everything stays
     /// recoverable until the user empties the Trash themselves.
+    ///
+    /// Anything the app cannot move itself is collected and handed to Finder in
+    /// **one** call. Asking Finder per item meant a separate Touch ID prompt for
+    /// every protected file — clearing a cache folder could ask dozens of times
+    /// and still fail. One call means at most one prompt.
+    ///
     /// Returns the paths that could not be moved, with the reason.
-    static func moveToTrash(paths: [String], completion: @escaping ([(String, String)]) -> Void) {
+    static func moveToTrash(paths: [String],
+                           useFinderFallback: Bool = true,
+                           completion: @escaping ([(String, String)]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var failures: [(String, String)] = []
+            var needsFinder: [String] = []
 
             for path in paths {
                 let url = URL(fileURLWithPath: path)
                 do {
                     try FileManager.default.trashItem(at: url, resultingItemURL: nil)
                 } catch {
-                    // Root-owned items need an administrator. Finder asks for
-                    // the password itself and still moves the item to the Trash.
-                    let escaped = path.replacingOccurrences(of: "\\", with: "\\\\")
-                        .replacingOccurrences(of: "\"", with: "\\\"")
-                    let script = "tell application \"Finder\" to delete POSIX file \"\(escaped)\""
-                    let fallback = Shell.osascript(script)
-                    if !fallback.ok {
-                        failures.append((path, error.localizedDescription))
-                    }
+                    needsFinder.append(path)
+                }
+            }
+
+            if !needsFinder.isEmpty && useFinderFallback {
+                let remaining = AppScanner.finderTrash(needsFinder)
+                for path in remaining {
+                    failures.append((path, "macOS would not allow this item to be moved."))
+                }
+            } else {
+                for path in needsFinder {
+                    failures.append((path, "Protected by macOS — needs Full Disk Access."))
                 }
             }
 
             DispatchQueue.main.async { completion(failures) }
         }
+    }
+
+    /// Hands a batch to Finder, which puts up a single authentication sheet for
+    /// the whole set. Returns whatever is still present afterwards.
+    private static func finderTrash(_ paths: [String]) -> [String] {
+        let items = paths.map { path -> String in
+            let escaped = path.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "POSIX file \"\(escaped)\""
+        }.joined(separator: ", ")
+
+        let script = "tell application \"Finder\" to delete { \(items) }"
+        _ = Shell.osascript(script)
+
+        // Trust the filesystem rather than the script's exit status: Finder
+        // reports success in cases where nothing actually moved.
+        return paths.filter { FileManager.default.fileExists(atPath: $0) }
     }
 
     func removeFromList(paths: Set<String>) {

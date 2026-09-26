@@ -478,7 +478,8 @@ final class StorageScanner: ObservableObject {
     /// Moves the *contents* of a directory to the Trash, leaving the directory
     /// itself in place. Apps expect their cache folder to exist; removing the
     /// folder outright is what breaks them.
-    static func clearContents(of path: String, completion: @escaping (Int, [(String, String)]) -> Void) {
+    static func clearContents(of path: String,
+                              completion: @escaping (Int, [(String, String)]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let fm = FileManager.default
             guard let entries = try? fm.contentsOfDirectory(atPath: path) else {
@@ -486,9 +487,28 @@ final class StorageScanner: ObservableObject {
                 return
             }
 
-            let children = entries.map { path + "/" + $0 }
-            AppScanner.moveToTrash(paths: children) { failures in
-                completion(children.count - failures.count, failures)
+            // Separate what macOS protects before trying anything. Attempting a
+            // protected item only produces an authentication prompt that cannot
+            // succeed, so it is reported instead of attempted.
+            var movable: [String] = []
+            var protected: [(String, String)] = []
+
+            for entry in entries {
+                let child = path + "/" + entry
+                if Permissions.isReadable(child) {
+                    movable.append(child)
+                } else {
+                    protected.append((child, "Protected by macOS — needs Full Disk Access."))
+                }
+            }
+
+            if movable.isEmpty {
+                DispatchQueue.main.async { completion(0, protected) }
+                return
+            }
+
+            AppScanner.moveToTrash(paths: movable, useFinderFallback: false) { failures in
+                completion(movable.count - failures.count, failures + protected)
             }
         }
     }

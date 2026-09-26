@@ -62,6 +62,8 @@ struct BackupView: View {
     /// quietly leaving out a photo library or a mail store.
     @ViewBuilder
     private func permissionSection(p: Palette, backup: BackupService) -> some View {
+        PermissionsCard(permissions: state.permissions)
+
         if !backup.unreadablePaths.isEmpty {
             Card {
                 HStack(alignment: .top, spacing: 9) {

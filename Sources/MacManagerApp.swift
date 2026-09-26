@@ -70,6 +70,7 @@ final class AppState: ObservableObject {
     let duplicates = DuplicateFinder()
     let exclusions = ExclusionRules()
     let growth = GrowthExplorer()
+    let permissions = Permissions()
 
     @Published var section: Section = .dashboard
 
@@ -91,6 +92,7 @@ final class AppState: ObservableObject {
             duplicates.objectWillChange,
             exclusions.objectWillChange,
             growth.objectWillChange,
+            permissions.objectWillChange,
         ]
         // One exclusion list, shared by everything that walks the disk.
         search.exclusions = exclusions

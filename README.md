@@ -188,12 +188,24 @@ costs a few megabytes; a wrong match costs you data.
 
 ## Permissions
 
-- **Administrator password** — only if you remove something owned by root. The
-  app hands the move to Finder, which asks you directly. It never runs `sudo`.
+macOS protects some folders behind **Full Disk Access**, and no application can
+grant itself that — an app able to switch on the thing that protects you from
+apps would be no protection at all. So Mac Manager detects what is blocked, says
+what it costs you, opens the exact settings pane and reveals itself in Finder so
+it can be dragged into the list.
+
+Without it, 9 of the entries in `~/Library/Caches` on a typical Mac are
+unreadable, along with your Photos library, Mail and Safari data — invisible to
+scans and missing from backups.
+
+Protected items are now detected *before* anything is attempted, rather than
+being tried and failing. Anything the app genuinely cannot move itself is handed
+to Finder in a single call, so at most one authentication prompt appears where
+there used to be one per file.
+
+- **Administrator password** — only when removing something owned by root. Finder
+  asks, once, for the whole batch. The app never runs `sudo`.
 - **Automation (Finder)** — same case, prompted once by macOS.
-- **Full Disk Access** — optional. Without it a few protected paths report as
-  empty. Grant it in System Settings › Privacy & Security if you want those
-  measured.
 
 ## Known limits
 
