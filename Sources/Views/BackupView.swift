@@ -728,6 +728,23 @@ struct BackupView: View {
                 }
             }
 
+            Divider()
+            HStack(spacing: 6) {
+                Image(systemName: BackupService.usingModernRsync ? "hare.fill" : "tortoise.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(BackupService.usingModernRsync ? p.good : p.textMuted)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Copy engine: \(BackupService.rsyncDescription)")
+                        .font(.system(size: 10)).foregroundColor(p.textSecondary)
+                    if !BackupService.usingModernRsync {
+                        Text("Installing rsync 3 (brew install rsync) makes copies about 1.5x faster and re-scans about 4x faster. Optional — this works without it.")
+                            .font(.system(size: 10)).foregroundColor(p.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer()
+            }
+
             Text("Each of these is written atomically with the previous version kept beside it, so losing power mid-write leaves the old file intact rather than a half-written one. A file that cannot be read is restored from its backup automatically.")
                 .font(.system(size: 10)).foregroundColor(p.textMuted)
                 .fixedSize(horizontal: false, vertical: true)

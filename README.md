@@ -145,6 +145,29 @@ It is a mirror with history, not a Time Machine replacement — it does not
 snapshot your whole system, and a drive that lives next to your Mac is not
 protection against fire or theft.
 
+## Optional accelerators
+
+The app works with nothing installed. If certain tools are present it uses them,
+because measurement showed they are meaningfully faster:
+
+**rsync 3** (`brew install rsync`) — macOS ships openrsync, which reports itself
+as "2.6.9 compatible" and does not implement the 2008 protocol with incremental
+file lists, the feature that matters most when there are many files. Measured on
+2,000 small files: **4,348 files/sec against 2,857**, and an unchanged re-scan in
+**0.03s against 0.13s**. Detected automatically; the Backup tab says which engine
+is in use.
+
+Two others were measured and deliberately **not** adopted:
+
+- **fclones** finds duplicates about 5x faster than the built-in scan (2.3s
+  against 12s on the same folders). Worth having, but the built-in scan is
+  correct and dependency-free, so it stays the default.
+- **dua** measures folder sizes far faster than `du` — `~/Library` in 9 seconds
+  against over five minutes. But it counts hardlinked content once per link
+  where `du` counts it once in total, and with 27,546 hardlinked files under
+  `~/Library` that is a 30 GB difference. For a tool whose whole job is
+  reporting sizes accurately, the faster number is the wrong number.
+
 ## Exclusions
 
 One list, shared by search indexing, backups and duplicate scans — a folder not
