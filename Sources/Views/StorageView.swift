@@ -6,6 +6,7 @@ struct StorageView: View {
 
     @State private var confirmClear: CleanupTarget?
     @State private var lastResult: String?
+    @State private var confirmReclaimAll = false
 
     var body: some View {
         let p = Palette(scheme)
@@ -41,6 +42,12 @@ struct StorageView: View {
             trashCard(p: p)
             exploreCard(p: p)
         }
+        .alert(isPresented: $confirmReclaimAll) {
+            Alert(title: Text("Reclaim \(Fmt.bytes(state.storage.reclaimableBytes))?"),
+                  message: Text(reclaimMessage),
+                  primaryButton: .destructive(Text("Move to Trash")) { self.reclaimAll() },
+                  secondaryButton: .cancel())
+        }
         .alert(item: $confirmClear) { target in
             Alert(title: Text("Clear \(target.name)?"),
                   message: Text("The contents of \(target.displayPath) — \(Fmt.bytes(target.sizeBytes)) — will be moved to the Trash. The folder itself stays, and nothing is deleted until you empty the Trash."),
@@ -61,9 +68,14 @@ struct StorageView: View {
                 StatTile(label: "In use", value: Fmt.gb(vol.usedBytes),
                          detail: Fmt.percent(fraction) + " of the disk")
                 Divider().frame(height: 40)
-                StatTile(label: "Safe to reclaim", value: Fmt.bytes(state.storage.reclaimableBytes),
-                         detail: state.storage.isScanning ? "still measuring…" : "caches and build leftovers",
-                         accent: state.storage.reclaimableBytes > 1_000_000_000 ? p.good : nil)
+                HStack(alignment: .center, spacing: 10) {
+                    StatTile(label: "Safe to reclaim", value: Fmt.bytes(state.storage.reclaimableBytes),
+                             detail: state.storage.isScanning
+                                ? "still measuring…"
+                                : "\(state.storage.reclaimableTargets.count) folders of caches and build leftovers",
+                             accent: state.storage.reclaimableBytes > 1_000_000_000 ? p.good : nil)
+                    reclaimButton(p: p)
+                }
             }
 
             CapacityBar(fraction: fraction, height: 12)
@@ -80,6 +92,50 @@ struct StorageView: View {
                     .foregroundColor(p.textSecondary)
             }
         }
+    }
+
+    /// One action for the figure beside it.
+    private func reclaimButton(p: Palette) -> some View {
+        let storage = state.storage
+        let enabled = !storage.isClearing && !storage.isScanning
+            && storage.reclaimableBytes > 0
+
+        return Button(action: { self.confirmReclaimAll = true }) {
+            HStack(spacing: 7) {
+                if storage.isClearing {
+                    ProgressView().scaleEffect(0.4).frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(storage.isClearing ? "Reclaiming…" : "Reclaim all")
+                        .font(.system(size: 13, weight: .semibold))
+                    if storage.isClearing {
+                        Text("\(storage.clearedFolders) of \(storage.clearTotal) · \(storage.clearingName ?? "")")
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                    } else if enabled {
+                        Text("Frees up to \(Fmt.bytes(storage.reclaimableBytes))")
+                            .font(.system(size: 10))
+                    }
+                }
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(
+                LinearGradient(gradient: Gradient(colors: enabled || storage.isClearing
+                                                    ? [p.series3, p.series1]
+                                                    : [p.textMuted, p.textMuted]),
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .opacity(enabled || storage.isClearing ? 1 : 0.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(!enabled)
+        .help("Move the contents of every safe folder to the Trash")
     }
 
     private func noticeCard(p: Palette, result: String) -> some View {
@@ -180,6 +236,24 @@ struct StorageView: View {
                 }
                 Spacer()
                 Button(action: { self.state.section = .explore }) { Text("Open Explore") }
+            }
+        }
+    }
+
+    private var reclaimMessage: String {
+        let storage = state.storage
+        let names = storage.reclaimableTargets.map { $0.name }
+        let listed = names.prefix(6).joined(separator: ", ")
+        let more = names.count > 6 ? ", and \(names.count - 6) more" : ""
+        return "The contents of \(names.count) folders will be moved to the Trash: \(listed)\(more).\n\nThese rebuild themselves, so nothing is lost but a slower first launch. Folders macOS protects are skipped automatically. Nothing is deleted until you empty the Trash."
+    }
+
+    private func reclaimAll() {
+        state.storage.reclaimAllSafe { moved, freed, failures in
+            if failures.isEmpty {
+                self.lastResult = "Moved \(moved) items — \(Fmt.bytes(freed)) — to the Trash."
+            } else {
+                self.lastResult = "Moved \(moved) items — \(Fmt.bytes(freed)). \(failures.count) were protected by macOS and left alone."
             }
         }
     }

@@ -513,6 +513,72 @@ final class StorageScanner: ObservableObject {
         }
     }
 
+    // MARK: - Reclaim everything safe
+
+    @Published private(set) var isClearing = false
+    @Published private(set) var clearingName: String?
+    @Published private(set) var clearedFolders = 0
+    @Published private(set) var clearTotal = 0
+    @Published private(set) var clearedBytes: Int64 = 0
+
+    /// Folders worth offering in one go: safe, measured, and not already empty.
+    var reclaimableTargets: [CleanupTarget] {
+        return targets.filter { $0.safety == .safe && ($0.sizeBytes ?? 0) > 0 }
+    }
+
+    /// Clears every safe folder in turn.
+    ///
+    /// Sequential rather than concurrent: these are all on one disk, and the
+    /// user is told which folder is being worked on, which only means something
+    /// if one is being worked on at a time. Protected items are skipped by
+    /// `clearContents` rather than attempted, so a locked cache cannot stall
+    /// the run behind an authentication prompt.
+    func reclaimAllSafe(completion: @escaping (Int, Int64, [(String, String)]) -> Void) {
+        if isClearing { return }
+
+        let queue = reclaimableTargets
+        if queue.isEmpty { completion(0, 0, []); return }
+
+        isClearing = true
+        clearedFolders = 0
+        clearTotal = queue.count
+        clearedBytes = 0
+        var movedItems = 0
+        var failures: [(String, String)] = []
+
+        func next(_ index: Int) {
+            guard index < queue.count else {
+                let freed = self.clearedBytes
+                self.isClearing = false
+                self.clearingName = nil
+                self.refresh()
+                completion(movedItems, freed, failures)
+                return
+            }
+
+            let target = queue[index]
+            self.clearingName = target.name
+
+            StorageScanner.clearContents(of: target.path) { moved, problems in
+                movedItems += moved
+                failures.append(contentsOf: problems)
+                self.clearedFolders = index + 1
+                // Everything moved from this folder counts toward the total,
+                // minus whatever had to be left behind.
+                if problems.isEmpty {
+                    self.clearedBytes += target.sizeBytes ?? 0
+                } else if moved > 0 {
+                    let all = moved + problems.count
+                    self.clearedBytes += Int64(Double(target.sizeBytes ?? 0)
+                                                * Double(moved) / Double(all))
+                }
+                next(index + 1)
+            }
+        }
+
+        next(0)
+    }
+
     static func revealTrashInFinder() {
         Shell.run("/usr/bin/open", [trashPath])
     }
