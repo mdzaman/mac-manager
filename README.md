@@ -44,6 +44,12 @@ added against 740 MB updated, so almost all of it was genuinely new.
 One pass collects the changed files; every level of drill-down is grouped from
 that list, so navigating deeper is instant however large the tree.
 
+The scan starts when you open the tab and reports what it is doing as it goes.
+Scale is the limit rather than efficiency — a home folder means walking about
+1.4 million inodes, roughly 70 seconds, and a kernel-side `find -newermt` over
+the same tree was no quicker. Smaller folders are immediate: Desktop takes under
+a second. A Stop button abandons a scan in flight.
+
 The one thing timestamps cannot show is deletion — a removed file leaves nothing
 behind to read a date from. Measured snapshots cover that, and are kept alongside
 as *Folders that shrank*.

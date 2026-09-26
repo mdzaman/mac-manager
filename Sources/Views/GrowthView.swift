@@ -34,19 +34,7 @@ struct GrowthView: View {
         }) {
             controls(p: p, explorer: explorer)
             headline(p: p, explorer: explorer)
-
-            if explorer.isScanning {
-                Card { LoadingRow(text: "\(explorer.stage) \(explorer.scannedCount) files checked") }
-            } else if let note = explorer.note {
-                Card {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12)).foregroundColor(p.good)
-                        Text(note).font(.system(size: 12)).foregroundColor(p.textPrimary)
-                        Spacer()
-                    }
-                }
-            }
+            statusSection(p: p, explorer: explorer)
 
             if !explorer.changed.isEmpty {
                 timeline(p: p, explorer: explorer)
@@ -58,6 +46,54 @@ struct GrowthView: View {
             deletionsCard(p: p)
             explainer(p: p)
         }
+        .onAppear {
+            // Every other tab populates itself; this one used to sit empty
+            // until its button was found, which read as broken.
+            if !explorer.hasScanned && !explorer.isScanning {
+                explorer.scan(root: root, rules: state.exclusions)
+            }
+        }
+    }
+
+    /// Scanning, finished-and-empty, or never-run — each says what to do next.
+    @ViewBuilder
+    private func statusSection(p: Palette, explorer: GrowthExplorer) -> some View {
+        if explorer.isScanning {
+            Card {
+                HStack(spacing: 10) {
+                    ProgressView().scaleEffect(0.5).frame(width: 18, height: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(explorer.stage.isEmpty ? "Looking for changes…" : explorer.stage)
+                            .font(.system(size: 13, weight: .medium)).foregroundColor(p.textPrimary)
+                        Text("\(explorer.scannedCount) files checked · \(explorer.changed.count) changed so far"
+                             + (GrowthExplorer.estimatedScanSeconds(for: root).map {
+                                 " · this folder usually takes about \(Int($0)) seconds" } ?? ""))
+                            .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                    }
+                    Spacer()
+                    Button("Stop") { explorer.cancel() }
+                }
+            }
+        } else if explorer.changed.isEmpty {
+            Card {
+                EmptyState(icon: explorer.hasScanned ? "checkmark.circle" : "clock.arrow.circlepath",
+                           title: explorer.hasScanned
+                            ? "Nothing changed in that period"
+                            : "Ready to look for changes",
+                           message: explorer.hasScanned
+                            ? (explorer.note ?? "Try a longer period, or a different folder above.")
+                            : "Pick a folder and a period above, then press Find changes.")
+
+                HStack {
+                    Spacer()
+                    Button(action: { explorer.scan(root: self.root, rules: self.state.exclusions) }) {
+                        Text(explorer.hasScanned ? "Scan again" : "Find changes")
+                    }
+                    Spacer()
+                }
+                .padding(.bottom, 8)
+            }
+        }
     }
 
     // MARK: - Controls
@@ -68,7 +104,10 @@ struct GrowthView: View {
                 Text("Look in").font(.system(size: 10, weight: .semibold))
                     .foregroundColor(p.textMuted).frame(width: 48, alignment: .leading)
                 ForEach(ExploreShortcut.all) { shortcut in
-                    Button(action: { self.root = shortcut.path }) {
+                    Button(action: {
+                        self.root = shortcut.path
+                        explorer.scan(root: shortcut.path, rules: self.state.exclusions)
+                    }) {
                         Text(shortcut.label)
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(self.root == shortcut.path ? .white : p.series1)

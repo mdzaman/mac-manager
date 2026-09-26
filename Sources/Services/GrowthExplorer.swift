@@ -31,11 +31,28 @@ final class GrowthExplorer: ObservableObject {
 
     private let work = DispatchQueue(label: "com.macmanager.growth", qos: .userInitiated)
 
+    /// Bumped to abandon a scan in flight. Walking a home folder means over a
+    /// million inodes and about a minute, so there has to be a way out.
+    private var generation = 0
+    /// True once a scan has been started in this session, so the tab knows the
+    /// difference between "nothing found" and "nothing run yet".
+    @Published private(set) var hasScanned = false
+
     // MARK: - Scanning
+
+    func cancel() {
+        generation += 1
+        isScanning = false
+        stage = ""
+        if changed.isEmpty { note = "Scan stopped." }
+    }
 
     func scan(root: String, rules: ExclusionRules?) {
         if isScanning { return }
 
+        generation += 1
+        let token = generation
+        hasScanned = true
         let since = window.cutoff(custom: customDate)
         isScanning = true
         changed = []
@@ -60,6 +77,14 @@ final class GrowthExplorer: ObservableObject {
                     includingPropertiesForKeys: keys, options: []) {
 
                 for case let url as URL in walker {
+                    // Checked per batch rather than per file; reading a
+                    // property a million times costs more than it saves.
+                    if seen % 2_000 == 0 {
+                        var cancelled = false
+                        DispatchQueue.main.sync { cancelled = token != self.generation }
+                        if cancelled { return }
+                    }
+
                     let name = url.lastPathComponent
                     guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
 
@@ -93,6 +118,7 @@ final class GrowthExplorer: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                guard token == self.generation else { return }
                 self.changed = found
                 self.scannedCount = seen
                 self.isScanning = false
@@ -214,6 +240,17 @@ final class GrowthExplorer: ObservableObject {
         return totals.enumerated().map { index, bytes in
             (day: cutoff.addingTimeInterval(bucketSpan * Double(index) + bucketSpan / 2),
              bytes: bytes)
+        }
+    }
+
+    /// Roughly how long a root will take, from the measured walk rate of about
+    /// 21,000 files a second.
+    static func estimatedScanSeconds(for root: String) -> Double? {
+        let home = NSHomeDirectory()
+        switch root {
+        case home: return 70
+        case home + "/Library": return 50
+        default: return nil
         }
     }
 
