@@ -1,62 +1,6 @@
 import Combine
 import SwiftUI
 
-enum Section: String, CaseIterable, Identifiable {
-    case dashboard = "Overview"
-    case apps = "Applications"
-    case memory = "Memory"
-    case storage = "Storage"
-    case explore = "Explore"
-    case growth = "Growth"
-    case ports = "Ports"
-    case find = "Find"
-    case organize = "Organize"
-    case backup = "Backup"
-    case duplicates = "Duplicates"
-
-    var id: String { return rawValue }
-
-    var icon: String {
-        switch self {
-        case .dashboard: return "gauge"
-        case .apps: return "square.grid.2x2"
-        case .memory: return "memorychip"
-        case .storage: return "internaldrive"
-        case .explore: return "eye.slash"
-        case .growth: return "chart.line.uptrend.xyaxis"
-        case .ports: return "network"
-        case .find: return "sparkle.magnifyingglass"
-        case .organize: return "folder.badge.gearshape"
-        case .backup: return "externaldrive.badge.timemachine"
-        case .duplicates: return "doc.on.doc"
-        }
-    }
-
-    /// Which sidebar group this belongs to.
-    var group: String {
-        switch self {
-        case .find, .organize, .backup, .duplicates: return "Files"
-        default: return "System"
-        }
-    }
-
-    var blurb: String {
-        switch self {
-        case .dashboard: return "How this Mac is doing right now."
-        case .apps: return "Everything installed, what it costs you, and how to remove it cleanly."
-        case .memory: return "What is using your memory, grouped by app."
-        case .storage: return "Where your disk space went, and what is safe to reclaim."
-        case .explore: return "Drill into any folder — including the hidden ones Finder will not show you."
-        case .growth: return "What changed, where, and when — drillable to the file, for any period."
-        case .find: return "Search your files by meaning as well as by name, and tag them."
-        case .organize: return "Sort a messy folder into a structure — previewed first, undoable after."
-        case .backup: return "Mirror your folders to an external drive, keeping old versions."
-        case .duplicates: return "Identical copies, and files sharing a name but not their contents."
-        case .ports: return "Which programs are listening for network connections."
-        }
-    }
-}
-
 /// One owner for every service, so each tab shows the same numbers and a
 /// refresh in one place is visible everywhere.
 final class AppState: ObservableObject {
@@ -71,6 +15,7 @@ final class AppState: ObservableObject {
     let exclusions = ExclusionRules()
     let growth = GrowthExplorer()
     let permissions = Permissions()
+    let health = HealthScanner()
 
     @Published var section: Section = .dashboard
 
@@ -93,6 +38,7 @@ final class AppState: ObservableObject {
             exclusions.objectWillChange,
             growth.objectWillChange,
             permissions.objectWillChange,
+            health.objectWillChange,
         ]
         // One exclusion list, shared by everything that walks the disk.
         search.exclusions = exclusions
@@ -113,9 +59,27 @@ final class AppState: ObservableObject {
         storage.refresh()
         memory.start()
         ports.start()
+        // A few seconds in, once ports and memory have reported, so a serious
+        // finding shows on the sidebar without the tab having to be opened.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            self?.runHealthCheck()
+        }
         backup.begin()
         backup.refreshVolumes()
         search.loadIfNeeded()
+    }
+
+    /// Gathers what the other services already know and runs the health check.
+    func runHealthCheck() {
+        var inputs = HealthInputs()
+        inputs.ports = ports.entries
+        inputs.memory = memory.snapshot
+        inputs.volume = storage.volume
+        inputs.reclaimableBytes = storage.reclaimableBytes
+        inputs.trashBytes = storage.trashBytes
+        inputs.lastBackup = backup.history.lastCompleted?.finishedAt
+        inputs.hasFullDiskAccess = permissions.hasFullDiskAccess
+        health.run(inputs: inputs)
     }
 
     func refreshAll() {
@@ -166,6 +130,7 @@ struct RootView: View {
     private var content: some View {
         switch state.section {
         case .dashboard: DashboardView()
+        case .health: HealthView()
         case .apps: AppsView()
         case .memory: MemoryView()
         case .storage: StorageView()
@@ -183,6 +148,11 @@ struct RootView: View {
 struct SidebarView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.colorScheme) private var scheme
+
+    /// Problems that need action — critical and warning, not informational.
+    private var healthBadge: Int {
+        return state.health.count(.critical) + state.health.count(.warning)
+    }
 
     var body: some View {
         let p = Palette(scheme)
@@ -211,7 +181,9 @@ struct SidebarView: View {
                         .padding(.bottom, 4)
 
                     ForEach(Section.allCases.filter { $0.group == group }) { item in
-                        SidebarRow(section: item, selected: self.state.section == item) {
+                        SidebarRow(section: item, selected: self.state.section == item,
+                                   badge: item == .health ? self.healthBadge : nil,
+                                   badgeCritical: self.state.health.worst == .critical) {
                             self.state.section = item
                         }
                     }
@@ -241,6 +213,8 @@ struct SidebarRow: View {
     @Environment(\.colorScheme) private var scheme
     let section: Section
     let selected: Bool
+    var badge: Int? = nil
+    var badgeCritical: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -253,6 +227,13 @@ struct SidebarRow: View {
                 Text(section.rawValue)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
                 Spacer()
+                if let badge = badge, badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(badgeCritical ? p.critical : p.serious))
+                }
             }
             .foregroundColor(selected ? .white : p.textPrimary)
             .padding(.horizontal, 10)
