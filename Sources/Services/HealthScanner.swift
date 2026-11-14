@@ -10,6 +10,10 @@ struct HealthInputs {
     var trashBytes: Int64 = 0
     var lastBackup: Date?
     var hasFullDiskAccess = true
+    /// Largest memory users, already grouped by app.
+    var topMemory: [ProcessGroup] = []
+    /// Largest measured storage folders, name and bytes.
+    var topStorage: [(name: String, bytes: Int64)] = []
 }
 
 /// A startup item read from a launchd property list.
@@ -320,16 +324,126 @@ final class HealthScanner: ObservableObject {
 
     // MARK: - Hardware
 
+    struct BusyProcess { let pid: Int32; let name: String; let path: String; let cpu: Double }
+
+    /// The processes using the most CPU right now. The usual answer to "why is
+    /// it hot", "why is the battery draining" and "why is it slow".
+    static func topCPU(limit: Int = 4) -> [BusyProcess] {
+        let output = Shell.run("/bin/ps", ["-Ao", "pid,pcpu,comm", "-r"]).out
+        var found: [BusyProcess] = []
+        for (index, line) in output.components(separatedBy: .newlines).enumerated() {
+            if index == 0 { continue }
+            let fields = line.whitespaceFields
+            guard fields.count >= 3, let pid = Int32(fields[0]), let cpu = Double(fields[1]) else { continue }
+            if cpu < 5 { break }
+            let path = fields[2...].joined(separator: " ")
+            found.append(BusyProcess(pid: pid, name: (path as NSString).lastPathComponent, path: path, cpu: cpu))
+            if found.count >= limit { break }
+        }
+        return found
+    }
+
+    /// Processes that are part of macOS itself. They are named as causes but
+    /// never offered a Quit button — quitting them fixes nothing.
+    static func isSystemProcess(_ path: String) -> Bool {
+        return path.hasPrefix("/System/") || path.hasPrefix("/usr/") || path.hasPrefix("/sbin/")
+            || path.contains("kernel_task")
+    }
+
+    struct SleepBlocker { let pid: Int32; let name: String; let reason: String }
+
+    /// Apps holding a power assertion that stops the Mac sleeping when idle.
+    static func sleepBlockers() -> [SleepBlocker] {
+        let output = Shell.run("/usr/bin/pmset", ["-g", "assertions"]).out
+        var found: [SleepBlocker] = []
+        for line in output.components(separatedBy: .newlines) {
+            guard line.contains("NoIdleSleepAssertion") || line.contains("PreventUserIdleSystemSleep")
+                    || line.contains("PreventSystemSleep") else { continue }
+            // "   pid 9105(Claude): [0x...] 00:03:20 NoIdleSleepAssertion named: "Electron""
+            guard let pidRange = line.range(of: "pid "), let open = line.firstIndex(of: "("),
+                  let close = line.firstIndex(of: ")"), open < close else { continue }
+            let pid = Int32(line[pidRange.upperBound ..< open].trimmingCharacters(in: .whitespaces)) ?? 0
+            let name = String(line[line.index(after: open) ..< close])
+            // powerd holding the display awake is normal use, not a culprit.
+            if name == "powerd" || name == "coreaudiod" || pid == 0 { continue }
+            // System daemons take short assertions for things like Handoff;
+            // only apps are worth naming as the reason a Mac will not sleep.
+            let path = Shell.run("/bin/ps", ["-p", "\(pid)", "-o", "comm="]).out
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.isEmpty || isSystemProcess(path) { continue }
+            var reason = ""
+            if let named = line.range(of: "named: ") {
+                reason = line[named.upperBound...].trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+            }
+            if !found.contains(where: { $0.pid == pid }) {
+                found.append(SleepBlocker(pid: pid, name: name, reason: reason))
+            }
+        }
+        return found
+    }
+
+    static func recentReports(matching test: (String) -> Bool, days: Int) -> [String] {
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        var found: [String] = []
+        for directory in ["/Library/Logs/DiagnosticReports", NSHomeDirectory() + "/Library/Logs/DiagnosticReports"] {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            for name in names where !name.hasPrefix(".") && test(name) {
+                let path = directory + "/" + name
+                if let modified = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
+                   modified >= cutoff {
+                    found.append(path)
+                }
+            }
+        }
+        return found.sorted()
+    }
+
+    struct SystemExtension { let name: String; let bundleID: String; let state: String }
+
+    /// Third-party drivers. They run with deep system access, so they are the
+    /// first suspects when the kernel panics or sleep and shutdown misbehave.
+    static func systemExtensions() -> [SystemExtension] {
+        let output = Shell.run("/usr/bin/systemextensionsctl", ["list"]).out
+        var found: [SystemExtension] = []
+        for line in output.components(separatedBy: .newlines) {
+            let columns = line.components(separatedBy: "\t")
+            guard columns.count >= 6, columns[2].count == 10 else { continue }
+            let bundle = columns[3].components(separatedBy: " ").first ?? columns[3]
+            let state = columns[5].trimmingCharacters(in: CharacterSet(charactersIn: "[] "))
+            found.append(SystemExtension(name: columns[4], bundleID: bundle, state: state))
+        }
+        return found
+    }
+
     static func checkHardware(inputs: HealthInputs) -> [HealthFinding] {
         var findings: [HealthFinding] = []
+        let busy = topCPU()
+        let busyLines = busy.map { "\($0.name) — \(Int($0.cpu))% CPU" }
+        let quittable = busy.filter { !isSystemProcess($0.path) && $0.cpu >= 20 && !$0.name.contains("MacManager") }
 
-        // Battery — absent on desktops, in which case the section is skipped.
+        func quitFixes(_ processes: [BusyProcess]) -> [HealthFix] {
+            return processes.prefix(2).map { process in
+                HealthFix(label: "Quit \(process.name.prefix(22))", icon: "xmark.circle",
+                          confirmation: "\(process.name) (PID \(process.pid)) will be asked to quit. Unsaved work in it may be lost.",
+                          action: .quitProcesses([process.pid]), destructive: true)
+            }
+        }
+
+        // ---- Battery: wear -------------------------------------------------
         let power = Shell.run("/usr/sbin/system_profiler", ["SPPowerDataType"]).out
+        let hasBattery = power.contains("Maximum Capacity:")
         if let capacityText = value(after: "Maximum Capacity:", in: power),
            let capacity = Int(capacityText.replacingOccurrences(of: "%", with: "")) {
             let condition = value(after: "Condition:", in: power) ?? "Unknown"
-            let cycles = value(after: "Cycle Count:", in: power) ?? "?"
+            let cycles = Int(value(after: "Cycle Count:", in: power) ?? "") ?? 0
             let healthy = capacity >= 80 && condition == "Normal"
+            var cause: [String] = []
+            if !healthy {
+                cause.append("Capacity has fallen to \(capacity)% of the original after \(cycles) charge cycles.")
+                if cycles > 800 { cause.append("The cycle count is close to the 1,000 the battery is rated for — this is ordinary wear.") }
+                else if capacity < 80 { cause.append("That is more wear than \(cycles) cycles normally causes, which points to heat or long periods at full charge.") }
+                if condition != "Normal" { cause.append("macOS itself reports the condition as “\(condition)”.") }
+            }
             findings.append(HealthFinding(
                 id: "battery", category: .hardware,
                 severity: healthy ? .ok : (capacity < 70 || condition != "Normal" ? .warning : .info),
@@ -338,41 +452,115 @@ final class HealthScanner: ObservableObject {
                 why: "Batteries lose capacity with use. Apple considers a battery worn below 80% of its original capacity, and most MacBook batteries are rated for 1,000 cycles.",
                 steps: healthy
                     ? ["Nothing to do. Keeping Optimised Battery Charging on slows further wear."]
-                    : ["Press “Open Battery settings” and check Battery Health.", "Turn on Optimised Battery Charging if it is off.", "If the condition reads Service Recommended, book a battery replacement with Apple."],
+                    : ["Press “Open Battery settings” and check Battery Health.", "Turn on Optimised Battery Charging if it is off.", "If the condition reads Service Recommended, book a battery replacement with Apple — it is the only real fix for a worn battery."],
+                rootCause: cause,
                 fixes: healthy ? [] : [HealthFix(label: "Open Battery settings", icon: "battery.75", confirmation: nil,
                                                 action: .openURL("x-apple.systempreferences:com.apple.Battery-Settings.extension"))]))
         }
 
+        // ---- Battery: drain right now ---------------------------------------
+        // "-InternalBattery-0 (id=...)	42%; discharging; 1:24 remaining present: true"
+        let batt = Shell.run("/usr/bin/pmset", ["-g", "batt"]).out
+        let blockers = sleepBlockers()
+        if hasBattery, batt.contains("discharging"),
+           let percentRange = batt.range(of: "[0-9]+%", options: .regularExpression),
+           let percent = Double(batt[percentRange].dropLast()),
+           let timeRange = batt.range(of: "[0-9]+:[0-9]{2} remaining", options: .regularExpression) {
+            let clock = batt[timeRange].replacingOccurrences(of: " remaining", with: "").components(separatedBy: ":")
+            let minutes = (Double(clock[0]) ?? 0) * 60 + (Double(clock.count > 1 ? clock[1] : "0") ?? 0)
+            // What a full charge would last at the present rate of use.
+            let fullChargeHours = percent > 5 ? (minutes / (percent / 100)) / 60 : 99
+            if fullChargeHours < 5 && minutes > 0 {
+                var cause = busyLines.prefix(3).map { "Using power now: \($0)" }
+                cause.append(contentsOf: blockers.map { "\($0.name) is stopping the Mac from sleeping when idle" + ($0.reason.isEmpty ? "." : " (“\($0.reason)”).") })
+                if cause.isEmpty { cause = ["No single process stands out; the drain is spread across normal activity and screen brightness."] }
+                findings.append(HealthFinding(
+                    id: "battery-drain", category: .hardware, severity: fullChargeHours < 3 ? .warning : .info,
+                    title: "Battery is draining quickly",
+                    summary: String(format: "%.0f%% left, about %d:%02d at this rate — a full charge would last roughly %.1f hours.",
+                                    percent, Int(minutes) / 60, Int(minutes) % 60, fullChargeHours),
+                    why: "At the current rate of use a full charge lasts well under what this Mac is capable of. That is almost always software working hard in the background rather than a battery fault.",
+                    steps: ["Quit the processes named under the root cause if you are not using them.", "Lower the screen brightness — the display is the largest single consumer.", "Open Battery settings and turn on Low Power Mode on battery."],
+                    rootCause: cause,
+                    fixes: quitFixes(quittable) + [HealthFix(label: "Open Battery settings", icon: "battery.25", confirmation: nil,
+                                                              action: .openURL("x-apple.systempreferences:com.apple.Battery-Settings.extension"))]))
+            }
+        }
+
+        // Battery temperature is reported in hundredths of a degree Celsius.
+        if hasBattery {
+            let io = Shell.sh("/usr/sbin/ioreg -rn AppleSmartBattery | /usr/bin/grep '\"Temperature\" ='")
+            if let equals = io.range(of: "= "), let raw = Double(io[equals.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                let celsius = raw / 100
+                if celsius >= 40 {
+                    findings.append(HealthFinding(
+                        id: "battery-heat", category: .hardware, severity: celsius >= 45 ? .warning : .info,
+                        title: String(format: "Battery is hot: %.0f°C", celsius),
+                        summary: "Heat is what ages a battery fastest.",
+                        why: "Lithium batteries degrade quickly above about 35°C and macOS will pause charging above 45°C to protect the cells.",
+                        steps: ["Quit the heavy processes named under the root cause.", "Move the Mac to a hard, flat surface and out of direct sun.", "If it is charging, unplug until it cools."],
+                        rootCause: busyLines.isEmpty ? ["Nothing is using much CPU, so the heat is environmental — the surface, the room, or charging."] : busyLines.prefix(3).map { "Generating heat: \($0)" },
+                        fixes: quitFixes(quittable)))
+                }
+            }
+        }
+
+        // ---- Thermal throttling ----------------------------------------------
+        let therm = Shell.run("/usr/bin/pmset", ["-g", "therm"]).out
+        var speedLimit = 100
+        if let range = therm.range(of: "CPU_Speed_Limit"), let equals = therm[range.upperBound...].range(of: "= ") {
+            speedLimit = Int(therm[equals.upperBound...].prefix { $0.isNumber }) ?? 100
+        }
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if speedLimit < 100 || thermalState == .serious || thermalState == .critical {
+            findings.append(HealthFinding(
+                id: "thermal", category: .hardware, severity: .warning,
+                title: "The Mac is overheating and has slowed itself down",
+                summary: speedLimit < 100 ? "The processor is limited to \(speedLimit)% of its speed." : "macOS reports serious thermal pressure.",
+                why: "When it runs too hot, macOS deliberately slows the processor to cool down. Everything feels sluggish until the cause stops.",
+                steps: ["Quit the processes named under the root cause.", "Make sure the vents at the back and sides are not blocked, and the Mac is on a hard surface.", "If this happens with nothing demanding running, the fans or vents may be clogged with dust — that needs a service visit."],
+                rootCause: busyLines.isEmpty ? ["No process is using much CPU. Heat without load points to blocked airflow or a failing fan."] : busyLines.map { "Generating heat: \($0)" },
+                fixes: quitFixes(quittable)))
+        }
+
+        // ---- Disk hardware -----------------------------------------------------
         let disk = Shell.run("/usr/sbin/diskutil", ["info", "/"]).out
         if let smart = value(after: "SMART Status:", in: disk) {
-            let verified = smart == "Verified"
-            if !verified && smart != "Not Supported" {
-                findings.append(HealthFinding(
-                    id: "smart", category: .hardware, severity: .critical,
-                    title: "The startup disk is reporting a hardware problem",
-                    summary: "SMART status: \(smart)",
-                    why: "SMART is the drive's own self-diagnosis. Anything other than Verified means the drive expects to fail, and drives that say so usually do.",
-                    steps: ["Back up everything important now — use the Backup tab.", "Do not wait for symptoms.", "Contact Apple or a repair provider about replacing the drive."],
-                    fixes: [HealthFix(label: "Go to Backup", icon: "externaldrive", confirmation: nil, action: .navigate(.backup))]))
-            } else if verified {
+            if smart == "Verified" {
                 findings.append(HealthFinding(
                     id: "smart", category: .hardware, severity: .ok,
                     title: "Startup disk hardware is healthy",
                     summary: "SMART status: Verified",
                     why: "The drive's own self-diagnosis reports no problems.",
                     steps: ["Nothing to do."]))
+            } else if smart != "Not Supported" {
+                findings.append(HealthFinding(
+                    id: "smart", category: .hardware, severity: .critical,
+                    title: "The startup disk is reporting a hardware problem",
+                    summary: "SMART status: \(smart)",
+                    why: "SMART is the drive's own self-diagnosis. Anything other than Verified means the drive expects to fail, and drives that say so usually do.",
+                    steps: ["Back up everything important now — use the Backup tab.", "Do not wait for symptoms.", "The drive is soldered to the logic board on this Mac, so the repair is a board replacement by Apple."],
+                    rootCause: ["The drive itself reported “\(smart)”. This is a physical fault, not something software can repair."],
+                    fixes: [HealthFix(label: "Go to Backup", icon: "externaldrive", confirmation: nil, action: .navigate(.backup))]))
             }
         }
 
+        // ---- Disk space ----------------------------------------------------------
         let free = inputs.volume.totalBytes > 0
             ? Double(inputs.volume.availableBytes) / Double(inputs.volume.totalBytes) : 1
         if inputs.volume.totalBytes > 0 && free < 0.20 {
+            let snapshots = Shell.run("/usr/bin/tmutil", ["listlocalsnapshots", "/"]).out
+                .nonEmptyLines.filter { $0.contains("com.apple.TimeMachine") }.count
+            var cause = inputs.topStorage.prefix(4).map { "\($0.name) holds \(Fmt.bytes($0.bytes))" }
+            if snapshots > 0 { cause.append("\(snapshots) local Time Machine snapshots are also holding space that macOS frees on demand.") }
+            if inputs.trashBytes > 500_000_000 { cause.append("The Trash is holding \(Fmt.bytes(inputs.trashBytes)) that is not free until it is emptied.") }
             findings.append(HealthFinding(
                 id: "disk-space", category: .hardware, severity: free < 0.10 ? .critical : .warning,
                 title: free < 0.10 ? "The disk is almost full" : "Disk space is running low",
                 summary: "\(Fmt.bytes(inputs.volume.availableBytes)) free of \(Fmt.bytes(inputs.volume.totalBytes))",
-                why: "macOS needs free space for swap, updates and temporary files. Below about 10% free, apps slow down, updates fail and files can be lost when a save cannot complete.",
-                steps: ["Press “Reclaim caches” to clear what rebuilds itself.", "Open Storage to see the largest folders.", "Open Growth to see what was added recently, and Duplicates for identical copies."],
+                why: "macOS needs free space for swap, updates and temporary files. Below about 10% free, apps slow down, updates fail and files can be lost when a save cannot complete. A nearly full SSD also wears faster.",
+                steps: ["Press “Reclaim caches” to clear what rebuilds itself.", "Open Storage — the folders named under the root cause are where the space is.", "Open Growth to see what was added recently, and Duplicates for identical copies.", "Empty the Trash when you are sure of its contents."],
+                rootCause: cause,
                 fixes: [
                     HealthFix(label: "Reclaim caches", icon: "sparkles",
                               confirmation: "The contents of every safe cache folder will be moved to the Trash. Protected folders are skipped.",
@@ -381,31 +569,113 @@ final class HealthScanner: ObservableObject {
                 ]))
         }
 
+        // ---- Memory ----------------------------------------------------------------
         if inputs.memory.pressureLevel != .normal || inputs.memory.swapUsedBytes > 4_000_000_000 {
             let pressured = inputs.memory.pressureLevel != .normal
+            let hogs = inputs.topMemory.prefix(4)
+            var cause = hogs.map { "\($0.name) holds \(Fmt.bytes($0.memoryBytes))" + ($0.members.count > 1 ? " across \($0.members.count) processes" : "") }
+            cause.append("\(Fmt.bytes(inputs.memory.compressedBytes)) is compressed and \(Fmt.bytes(inputs.memory.swapUsedBytes)) has been pushed to disk — the Mac needs more memory than the \(Fmt.gb(inputs.memory.totalBytes)) installed.")
+            let quitHogs = hogs.filter { $0.iconPath != nil && !$0.name.contains("Mac Manager") }.prefix(2).map { group in
+                HealthFix(label: "Quit \(group.name.prefix(22))", icon: "xmark.circle",
+                          confirmation: "\(group.name) will be asked to quit, freeing about \(Fmt.bytes(group.memoryBytes)). Unsaved work in it may be lost.",
+                          action: .quitProcesses(group.pids), destructive: true)
+            }
             findings.append(HealthFinding(
                 id: "memory", category: .hardware, severity: pressured ? .warning : .info,
                 title: pressured ? "Memory is under pressure" : "Heavy swap use",
                 summary: "\(Fmt.bytes(inputs.memory.usedBytes)) in use of \(Fmt.bytes(inputs.memory.totalBytes)) · \(Fmt.bytes(inputs.memory.swapUsedBytes)) swapped to disk",
-                why: "When memory runs short, macOS moves it to disk. That keeps things running but makes everything slower and wears the SSD.",
-                steps: ["Open Memory to see which apps hold the most.", "Quit the largest ones you are not using — browsers with many tabs are the usual cause.", "If this is constant, restarting clears swap."],
-                fixes: [HealthFix(label: "Open Memory", icon: "memorychip", confirmation: nil, action: .navigate(.memory))]))
+                why: "When memory runs short, macOS compresses it and then moves it to disk. That keeps things running but makes everything slower and adds wear to the SSD. Memory cannot be upgraded on this Mac, so the fix is using less of it.",
+                steps: ["Quit the largest apps named under the root cause that you are not using.", "In browsers, close tabs — each one is a separate process.", "Restarting clears swap entirely if this has built up over days."],
+                rootCause: cause,
+                fixes: Array(quitHogs) + [HealthFix(label: "Open Memory", icon: "memorychip", confirmation: nil, action: .navigate(.memory))]))
         }
 
-        switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical:
+        // ---- Processor load -----------------------------------------------------------
+        let load = Shell.sysctl("vm.loadavg").components(separatedBy: " ").compactMap { Double($0) }
+        let cores = Double(Shell.sysctlInt("hw.ncpu"))
+        if load.count >= 2, cores > 0, load[1] > cores {
             findings.append(HealthFinding(
-                id: "thermal", category: .hardware, severity: .warning,
-                title: "The Mac is running hot",
-                summary: "macOS is throttling performance to cool down.",
-                why: "Under thermal pressure the system slows the processor. It usually means something is using the CPU heavily, or the vents are blocked.",
-                steps: ["Open Memory, sort by CPU, and quit whatever is at the top.", "Move the Mac off soft surfaces so air can flow."],
-                fixes: [HealthFix(label: "Open Memory", icon: "memorychip", confirmation: nil, action: .navigate(.memory))]))
-        default:
-            break
+                id: "cpu-load", category: .hardware, severity: .warning,
+                title: "The processor is overloaded",
+                summary: String(format: "Load average %.1f over five minutes on %.0f cores.", load[1], cores),
+                why: "A load above the number of cores means more work is queued than the processor can run. Everything waits its turn, so the whole Mac feels slow.",
+                steps: ["Quit the processes named under the root cause if they are not doing something you want.", "If the same process returns after quitting, check the Startup tab — it may be set to relaunch."],
+                rootCause: busyLines.isEmpty ? ["The load was sustained earlier and has since eased."] : busyLines,
+                fixes: quitFixes(quittable)))
         }
 
-        // kern.boottime prints "{ sec = 1794651233, usec = ... }".
+        // ---- Kernel panics ---------------------------------------------------------------
+        let panics = recentReports(matching: { $0.hasSuffix(".panic") || $0.hasPrefix("Kernel-") || $0.hasPrefix("panic-") }, days: 30)
+        let extensions = systemExtensions()
+        if !panics.isEmpty {
+            var cause = extensions.map { "Third-party driver installed: \($0.name) (\($0.bundleID))" }
+            if cause.isEmpty { cause = ["No third-party drivers are installed, so the cause is more likely hardware — run Apple Diagnostics."] }
+            else { cause.insert("Most kernel panics on Macs trace to a third-party driver or a peripheral. These are the candidates:", at: 0) }
+            findings.append(HealthFinding(
+                id: "panics", category: .hardware, severity: panics.count >= 3 ? .critical : .warning,
+                title: "The Mac crashed completely \(panics.count) time\(panics.count == 1 ? "" : "s") this month",
+                summary: "A kernel panic is the whole system stopping, not one app.",
+                why: "Panics come from the lowest level of the system: a driver, a faulty peripheral, or failing hardware. Repeated ones lose work and can damage files.",
+                steps: ["Update or remove the third-party drivers named under the root cause, one at a time, and see whether the panics stop.", "Unplug hubs, docks and adapters and reconnect them one by one.", "Run Apple Diagnostics: shut down, hold the power button until startup options appear, then press Command-D.", "If panics continue with nothing attached and no third-party drivers, the fault is hardware and needs Apple."],
+                rootCause: cause,
+                evidence: panics.map { ($0 as NSString).lastPathComponent },
+                fixes: [HealthFix(label: "Show panic reports", icon: "folder", confirmation: nil,
+                                  action: .reveal("/Library/Logs/DiagnosticReports"))]))
+        }
+
+        // ---- Shutdown stalls ----------------------------------------------------------------
+        let stalls = recentReports(matching: { $0.hasPrefix("shutdown_stall") }, days: 30)
+        if stalls.count >= 2 {
+            findings.append(HealthFinding(
+                id: "shutdown-stalls", category: .hardware, severity: .info,
+                title: "Shutting down stalled \(stalls.count) times this month",
+                summary: "Something refused to quit when the Mac was shutting down or restarting.",
+                why: "macOS waits for every process to exit before powering off. When one hangs, shutdown stalls until the system gives up and forces it — which is how unsaved state gets lost.",
+                steps: ["Open the Startup tab and look at the items marked Always running — those are relaunched whenever they exit and are the usual culprits.", "Disable the ones you do not need.", "If it keeps happening, the report names the process: open one in Console to read it."],
+                rootCause: ["Each stall produced a report at the times listed below. Background services set to keep themselves alive are the common cause, because they restart while the system is trying to stop them."],
+                evidence: stalls.map { ($0 as NSString).lastPathComponent },
+                fixes: [
+                    HealthFix(label: "Open Startup", icon: "power", confirmation: nil, action: .navigate(.startup)),
+                    HealthFix(label: "Show reports", icon: "folder", confirmation: nil, action: .reveal("/Library/Logs/DiagnosticReports")),
+                ]))
+        }
+
+        // ---- Drivers waiting for approval -------------------------------------------------------
+        let waiting = extensions.filter { $0.state.contains("waiting") }
+        if !waiting.isEmpty {
+            findings.append(HealthFinding(
+                id: "extensions-waiting", category: .hardware, severity: .info,
+                title: "\(waiting.count) driver\(waiting.count == 1 ? " is" : "s are") installed but not approved",
+                summary: waiting.map { $0.name }.joined(separator: ", "),
+                why: "A system extension that is waiting for approval is not running, so whatever hardware or feature it supports will not work — and macOS will keep prompting about it.",
+                steps: ["Press “Open Login Items & Extensions”.", "Either allow the extension if you use that device, or uninstall the app it came with."],
+                rootCause: waiting.map { "\($0.name) (\($0.bundleID)) is in the state “\($0.state)”." },
+                fixes: [HealthFix(label: "Open Login Items & Extensions", icon: "puzzlepiece", confirmation: nil,
+                                  action: .openURL("x-apple.systempreferences:com.apple.LoginItems-Settings.extension"))]))
+        }
+
+        // ---- Wi-Fi signal ----------------------------------------------------------------------------
+        let airport = Shell.run("/usr/sbin/system_profiler", ["SPAirPortDataType"]).out
+        if let signalText = value(after: "Signal / Noise:", in: airport) {
+            // "-57 dBm / -95 dBm"
+            let numbers = signalText.components(separatedBy: CharacterSet(charactersIn: "0123456789-").inverted)
+                .compactMap { Int($0) }
+            if numbers.count >= 2 {
+                let signal = numbers[0], noise = numbers[1]
+                if signal < -70 {
+                    findings.append(HealthFinding(
+                        id: "wifi", category: .hardware, severity: signal < -80 ? .warning : .info,
+                        title: "Wi-Fi signal is weak",
+                        summary: "\(signal) dBm with \(noise) dBm of noise.",
+                        why: "Below about −70 dBm the connection slows and drops. It looks like a slow Mac or slow internet, and is neither.",
+                        steps: ["Move closer to the router, or move the router higher and into the open.", "Switch to the 5 GHz or 6 GHz network if the router offers one.", "If the signal is weak right next to the router, the Mac's antenna or the router is at fault."],
+                        rootCause: ["Signal \(signal) dBm, noise \(noise) dBm — a margin of \(signal - noise) dB. Healthy is −65 dBm or better.",
+                                    (value(after: "Channel:", in: airport)).map { "Connected on channel \($0)." } ?? "Channel unknown."]))
+                }
+            }
+        }
+
+        // ---- Uptime -----------------------------------------------------------------------------------
         let boot = Shell.sysctl("kern.boottime")
         if let range = boot.range(of: "sec = "),
            let seconds = Double(boot[range.upperBound...].prefix { $0.isNumber }) {
@@ -416,7 +686,8 @@ final class HealthScanner: ObservableObject {
                     title: "Not restarted for \(days) days",
                     summary: "A restart clears swap, stuck processes and pending updates.",
                     why: "Long uptimes let memory leaks and stale background processes accumulate. Many updates also wait for a restart to finish installing.",
-                    steps: ["Save your work.", "Choose Apple menu › Restart."]))
+                    steps: ["Save your work.", "Choose Apple menu › Restart."],
+                    rootCause: ["The Mac last started \(days) days ago."]))
             }
         }
 
@@ -721,8 +992,12 @@ final class HealthScanner: ObservableObject {
         var lines = ["mkdir -p \(shellQuote(destination))"]
         for item in items {
             if let label = item.label {
-                let domain = item.isSystem ? "system" : "gui/\(uid)"
-                lines.append("launchctl bootout \(domain)/\(shellQuote(label)) 2>/dev/null || true")
+                // Agents in /Library run in the user's session and daemons in
+                // the system one, so an item there is stopped in both.
+                lines.append("launchctl bootout gui/\(uid)/\(shellQuote(label)) 2>/dev/null || true")
+                if item.isSystem {
+                    lines.append("launchctl bootout system/\(shellQuote(label)) 2>/dev/null || true")
+                }
             }
             let flattened = item.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 .replacingOccurrences(of: "/", with: "__")
@@ -778,6 +1053,16 @@ final class HealthScanner: ObservableObject {
     }
 
     func note(_ message: String) { lastFixMessage = message }
+
+    /// Runs a shell script, through the standard macOS administrator prompt
+    /// when asked. The password goes to Apple's dialog, never to this app.
+    static func runScript(_ script: String, admin: Bool, prompt: String) -> Shell.Result {
+        if !admin { return Shell.run("/bin/sh", ["-c", script]) }
+        let escaped = script.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let safePrompt = prompt.replacingOccurrences(of: "\"", with: "'")
+        return Shell.osascript("do shell script \"\(escaped)\" with prompt \"\(safePrompt)\" with administrator privileges")
+    }
 
     // MARK: - Helpers
 

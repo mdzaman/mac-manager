@@ -4,6 +4,7 @@ import Foundation
 enum Section: String, CaseIterable, Identifiable {
     case dashboard = "Overview"
     case health = "Health"
+    case startup = "Startup"
     case apps = "Applications"
     case memory = "Memory"
     case storage = "Storage"
@@ -21,6 +22,7 @@ enum Section: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "gauge"
         case .health: return "stethoscope"
+        case .startup: return "power"
         case .apps: return "square.grid.2x2"
         case .memory: return "memorychip"
         case .storage: return "internaldrive"
@@ -45,6 +47,7 @@ enum Section: String, CaseIterable, Identifiable {
     var blurb: String {
         switch self {
         case .dashboard: return "How this Mac is doing right now."
+        case .startup: return "Everything that starts with this Mac — disable it, remove it, or uninstall the app behind it."
         case .health: return "Diagnose hardware, software, startup, port and security problems — with the fix."
         case .apps: return "Everything installed, what it costs you, and how to remove it cleanly."
         case .memory: return "What is using your memory, grouped by app."

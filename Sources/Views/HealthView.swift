@@ -269,6 +269,16 @@ struct HealthView: View {
     private func explainer(p: Palette) -> some View {
         Card {
             HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "wrench.and.screwdriver").font(.system(size: 12)).foregroundColor(p.series1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("What this cannot see").font(.system(size: 12, weight: .medium)).foregroundColor(p.textPrimary)
+                    Text("Fan speeds, internal temperature sensors and SSD wear counters need root access, which this app never takes. For a complete hardware test use Apple Diagnostics: shut down, hold the power button until the startup options appear, then press Command-D. It tests the logic board, memory, battery and sensors and gives a reference code for any fault.")
+                        .font(.system(size: 11)).foregroundColor(p.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Divider()
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "info.circle.fill").font(.system(size: 12)).foregroundColor(p.series1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("How fixes work").font(.system(size: 12, weight: .medium)).foregroundColor(p.textPrimary)
@@ -347,6 +357,23 @@ struct HealthFindingCard: View {
                 Text(self.finding.why)
                     .font(.system(size: 11)).foregroundColor(p.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !finding.rootCause.isEmpty {
+                section(p: p, title: "Root cause on this Mac") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(self.finding.rootCause, id: \.self) { line in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "arrow.turn.down.right")
+                                    .font(.system(size: 9)).foregroundColor(self.tint)
+                                Text(line)
+                                    .font(.system(size: 11, weight: .medium)).foregroundColor(p.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                }
             }
 
             section(p: p, title: "How to fix it") {

@@ -59,8 +59,43 @@ never switched by the app — the button opens the right pane. Where an
 administrator is needed, macOS's own password prompt appears once for the whole
 batch; the password never passes through the app.
 
+Hardware findings carry a **root cause measured on this Mac**, not general
+advice: a fast-draining battery names the processes using power and the apps
+preventing sleep; memory pressure names the apps holding the memory and offers
+to quit them; a full disk names the folders; kernel panics list the third-party
+drivers installed, since those are the usual culprits. It also reports thermal
+throttling, processor overload, shutdown stalls, drivers awaiting approval and
+weak Wi-Fi signal.
+
+Fan speeds, internal temperature sensors and SSD wear counters need root access,
+which the app never takes. For those, the tab explains how to run Apple
+Diagnostics.
+
 The malware check matches launchd labels from published indicators. It is a
 tripwire, not an antivirus.
+
+### Startup
+
+Everything that starts with the Mac: launch agents for your account, agents and
+services installed for all users, and login items. Each row shows when it starts,
+whether it is running and how much memory it holds, and which installed app it
+belongs to.
+
+Three actions, because they are three different commitments:
+
+- **Disable** stops the item and tells macOS not to load it again. The file is
+  untouched and **Enable** reverses it exactly, so it acts on one click.
+- **Remove** also moves the file to quarantine, after a confirmation.
+- **Uninstall** opens the app uninstaller for the app behind the item, which
+  lists every file before anything moves and takes the startup items with it.
+
+Leftover items whose program no longer exists are flagged, with one button to
+remove them all. Ownership is decided by where the program lives, and by bundle
+identifier only when exactly one app can match — an updater is never pinned on
+the wrong app from a vendor that ships several.
+
+Login items are managed by macOS, which gives third parties no way to edit them,
+so those rows open the Login Items settings pane instead.
 
 ### Applications
 

@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
     let growth = GrowthExplorer()
     let permissions = Permissions()
     let health = HealthScanner()
+    let startup = StartupManager()
 
     @Published var section: Section = .dashboard
 
@@ -39,6 +40,7 @@ final class AppState: ObservableObject {
             growth.objectWillChange,
             permissions.objectWillChange,
             health.objectWillChange,
+            startup.objectWillChange,
         ]
         // One exclusion list, shared by everything that walks the disk.
         search.exclusions = exclusions
@@ -79,6 +81,11 @@ final class AppState: ObservableObject {
         inputs.trashBytes = storage.trashBytes
         inputs.lastBackup = backup.history.lastCompleted?.finishedAt
         inputs.hasFullDiskAccess = permissions.hasFullDiskAccess
+        inputs.topMemory = Array(memory.groups.prefix(6))
+        inputs.topStorage = storage.targets
+            .filter { ($0.sizeBytes ?? 0) > 0 }
+            .sorted { ($0.sizeBytes ?? 0) > ($1.sizeBytes ?? 0) }
+            .prefix(5).map { (name: $0.name, bytes: $0.sizeBytes ?? 0) }
         health.run(inputs: inputs)
     }
 
@@ -131,6 +138,7 @@ struct RootView: View {
         switch state.section {
         case .dashboard: DashboardView()
         case .health: HealthView()
+        case .startup: StartupView()
         case .apps: AppsView()
         case .memory: MemoryView()
         case .storage: StorageView()

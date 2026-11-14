@@ -89,6 +89,9 @@ struct HealthFinding: Identifiable {
     let why: String
     /// Numbered instructions for doing it by hand.
     let steps: [String]
+    /// What is actually causing it on this Mac right now, from measurement —
+    /// named processes, files and counts rather than general advice.
+    var rootCause: [String] = []
     /// A Terminal command for people who prefer one, with a Copy button.
     var command: String? = nil
     /// The specific things found — paths, process names, counts.
