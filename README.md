@@ -23,6 +23,80 @@ cp -R "build/Mac Manager.app" /Applications/
 
 Requires the Xcode Command Line Tools (`xcode-select --install`). Nothing else.
 
+## System tabs
+
+**Overview** — memory, storage, app count and open ports at a glance, plus large
+apps you have not opened in over six months.
+
+### Health
+
+Diagnoses hardware, software, startup, port and security problems, and attaches
+the fix to each one: what was found, why it matters, numbered steps to do it by
+hand, a Terminal command with a Copy button, and — where it is safe — a button
+that does it.
+
+- **Security** — known malware persistence, startup items launching from hidden
+  or temporary locations, firewall, FileVault, Gatekeeper, System Integrity
+  Protection, Full Disk Access.
+- **Hardware** — battery capacity and condition, the drive's SMART
+  self-diagnosis, free space, memory pressure and swap, thermal throttling, time
+  since the last restart.
+- **Software** — pending macOS updates, apps that crashed repeatedly this week,
+  processes pinned at high CPU, whether any backup exists.
+- **Startup** — launch items left behind by uninstalled apps, which macOS keeps
+  trying to start, and how many items start with the Mac.
+- **Ports** — anything reachable from the network.
+- **Cleanup** — reclaimable caches, a full Trash, stale diagnostic reports.
+
+The check only reads. It runs a few seconds after launch and badges the sidebar,
+so a serious finding does not wait for the tab to be opened.
+
+Every one-click fix is confirmed first and is reversible: files go to the Trash
+or to a quarantine folder, processes are asked to quit rather than killed.
+Disabled startup items are *moved*, renamed to their full original path so two
+files cannot collide and each records where it came from. Security settings are
+never switched by the app — the button opens the right pane. Where an
+administrator is needed, macOS's own password prompt appears once for the whole
+batch; the password never passes through the app.
+
+The malware check matches launchd labels from published indicators. It is a
+tripwire, not an antivirus.
+
+### Applications
+
+Everything in `/Applications` and `~/Applications` with its version, size, and
+the date you last opened it. Removing an app also finds the support files it
+scattered through your Library folders, which a plain drag-to-Trash leaves
+behind — often far larger than the app itself. Apps on the sealed system volume
+are listed for context and marked *Protected*.
+
+![Applications](docs/screenshots/applications.png)
+
+### Memory
+
+A live breakdown of app memory, wired, compressed and cached, with processes
+grouped by the app that owns them — so a browser reads as one row instead of
+forty. Quit asks nicely; Force Quit does not.
+
+![Memory](docs/screenshots/memory.png)
+
+### Storage
+
+Disk capacity, plus the directories that quietly accumulate gigabytes. Each is
+labelled *Safe to clear* or *Review first*. A **Reclaim all** button beside the
+"safe to reclaim" figure empties every safe folder in one go, naming them all
+before it starts. Folders are emptied, never removed, and anything macOS protects
+is skipped rather than attempted.
+
+![Storage](docs/screenshots/storage.png)
+
+### Explore
+
+Finder hides `~/Library` and every dot-folder, which is where large caches
+accumulate. Explore lists everything, biggest first, with a Hidden badge on
+anything Finder omits and breadcrumbs to drill down. Folders are listed instantly
+and measured afterwards.
+
 ### Growth
 
 **What changed, where, and when — drillable to the file, for any period.**
@@ -150,6 +224,14 @@ cleanly.
 It is a mirror with history, not a Time Machine replacement — it does not
 snapshot your whole system, and a drive that lives next to your Mac is not
 protection against fire or theft.
+
+### Duplicates
+
+Finds files that are byte-identical under different names, and files that share
+a name but differ inside. Comparison is by content: group by exact size, compare
+the first 64 KB, then hash the whole file for anything still matching. Same-name
+files with different contents are listed separately as versions, with nothing
+preselected.
 
 ## Optional accelerators
 
